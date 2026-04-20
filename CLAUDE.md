@@ -31,6 +31,16 @@ src/
   parser/          # Thin wrapper around the chosen SQL parser crate
 ```
 
+## Current Task
+- Active work is tracked in `TASK.md` at the repo root. Always read it at the start of a session to know what we're building next and which step we're on.
+
+## Current Progress
+- `src/main.rs` implements chunk-based read/write for an `i64` column:
+  - `write_column(path, &[i64])` writes all values as little-endian bytes
+  - `read_chunks(path, chunk_index)` seeks to `chunk_index * CHUNK_SIZE * 8` and reads up to one chunk (1024 values)
+  - Partial final chunks are handled (reads only `bytes_read`)
+- No `Column` abstraction yet — logic lives as free functions scoped to `i64`.
+
 ## Build System
 - Standard `cargo` — `cargo build`, `cargo run`, `cargo test`
 - No special flags needed beyond what Cargo.toml specifies
