@@ -1,80 +1,66 @@
-# Current Task: Columnar Abstraction
+# Current Task: ClickHouse-style Compressed Storage + Marks (i64 column)
 
-Build a `Column` abstraction that works with all numeric types (`i8`–`i64`, `u8`–`u64`, `f32`, `f64`), `bool`, and fixed-size strings. Disk-backed, chunked (1024 values/chunk).
-
----
-
-## Phase 1: Single-type `Column` struct (concrete `i64`)
-
-### Step 1 — Extract a `Column` struct ✓
-- [x] Create `src/column.rs`, declare `mod column;` in `main.rs`.
-- [x] Define `struct Column { path: PathBuf, num_rows: usize }` (hardcoded to `i64` for now).
-- [x] Move `write_column` / `read_chunks` into `impl Column` as `append_chunk(&mut self, &[i64])` and `read_chunk(&self, idx) -> Option<Vec<i64>>`.
-- [x] Fix the EOF bug: `read_chunk` uses `num_rows` to bound reads and returns `None` past the end.
-- [x] `main.rs` becomes a small driver that constructs a `Column` and calls methods.
-
-*Rust lesson: modules, `pub`, `&mut self` vs `&self`, `Option` vs `Result`.*
+Implement compressed, block-based storage for a single `i64` column, following ClickHouse's MergeTree storage model. Data is buffered, compressed with LZ4, and written in blocks. A parallel marks file tracks how to seek into compressed blocks at granule granularity.
 
 ---
 
-## Phase 2: The type system
+## Concepts (read first)
 
-### Step 2 — Define `DataType` enum
-- [ ] New `src/types.rs`. Variants: `I8, I16, I32, I64, U8, U16, U32, U64, F32, F64, Bool, FixedString(u16)`.
-- [ ] Add method `fn size_bytes(&self) -> usize` — per-value byte width (8 for `i64`, 1 for `bool`, `n` for `FixedString(n)`).
-- [ ] No `Value` enum yet — don't need it until we query.
+| Term | Definition |
+|---|---|
+| **Granule** | 512 consecutive `i64` values — the smallest unit of data you can skip over |
+| **Compressed block** | One LZ4-compressed payload, produced from a full 8 KB uncompressed buffer |
+| **Mark** | A triplet `(block_offset, granule_offset_in_decompressed, num_rows)` — enough to seek to any granule without decompressing earlier blocks |
 
-*Rust lesson: enums with data (`FixedString(u16)`), methods on enums.*
-
-### Step 3 — Make `Column` type-aware
-- [ ] Add `dtype: DataType` field to `Column`.
-- [ ] Rewrite `append_chunk` and `read_chunk` to take/return `&[u8]` and `Vec<u8>` (raw bytes).
-- [ ] Offset math uses `self.dtype.size_bytes()` instead of hardcoded `8`.
-
-*Key insight: columnar storage on disk is just typed bytes. The type only matters when you interpret them.*
+Each compressed block contains one or more complete granules (8 KB / 512 values × 8 bytes/value = exactly 2 granules per block, if the buffer fills completely). The final block may be partial.
 
 ---
 
-## Phase 3: Typed read/write helpers
+## Phase 1: Buffer and compress
 
-### Step 4 — Typed append/read per numeric type
-Pick one approach:
-- **(a)** Separate methods per type: `append_i64`, `read_chunk_i64`, etc. Verbose but clear.
-- **(b)** `trait ColumnType: Copy { const DTYPE: DataType; }`, generic `append<T: ColumnType>(&[T])` using `bytemuck::cast_slice`.
+### Step 1 — Simulate input + set up constants ✓
+- [x] In `src/storage.rs`, define `GRANULE_SIZE: usize = 512` and `BLOCK_BUFFER_SIZE: usize = 8 * 1024`.
+- [x] Generate a simulated `Vec<i64>` of 10 000 values in `main.rs`.
 
-Recommended path: do **(a)** for `i64` + `f64` first, feel the repetition, then refactor to **(b)**.
+### Step 2 — Buffer values and flush compressed blocks ✓
+- [x] Accumulate `i64` values as little-endian bytes into a `Vec<u8>` buffer.
+- [x] When buffer reaches `BLOCK_BUFFER_SIZE` or input is exhausted, LZ4-compress and write to `column.bin`.
+- [x] Each block is preceded by a `u32` compressed-length header so it can be read back without knowing the size in advance.
+- [x] Track running `block_offset` (including the 4-byte header).
 
-- [ ] Implement typed helpers for `i64` and `f64`.
-- [ ] Refactor into a `ColumnType` trait covering all numeric types.
+### Step 3 — Generate marks while writing ✓
+- [x] `Mark { block_offset, granule_offset, num_rows }` emitted at the start of every granule (`rows_in_buffer % GRANULE_SIZE == 0`).
+- [x] `granule_offset` is the byte position of the granule within the uncompressed block.
+- [x] Final mark's `num_rows` fixed up via `total % GRANULE_SIZE`.
 
-*Rust lesson: traits with associated constants, `bytemuck` for safe transmute, generic bounds.*
-
-### Step 5 — `bool` support
-- [ ] Store as 1 byte per bool (simple first; bit-packing later).
-- [ ] `append_bool` / `read_chunk_bool`.
-
-### Step 6 — `FixedString(n)` support
-- [ ] `append_str(&mut self, &[&str])` — pad/truncate each string to exactly `n` bytes (null-padded).
-- [ ] `read_chunk_str(idx) -> Vec<String>` — slice bytes into `n`-sized chunks, trim trailing zeros, `String::from_utf8`.
-
-*Rust lesson: `&str` vs `String`, UTF-8 validation, slice operations.*
+### Step 4 — Write marks file ✓
+- [x] Each mark serialized as three little-endian `u64`s (24 bytes) into `column.mrk`.
 
 ---
 
-## Phase 4: Prove it works
+## Phase 2: Verify round-trip
 
-### Step 7 — Tests
-- [ ] `#[cfg(test)] mod tests` in `column.rs`.
-- [ ] Round-trip test per type: write N values, read chunk-by-chunk, assert equality.
-- [ ] Partial-final-chunk test (N not a multiple of 1024).
+### Step 5 — Read back and decompress ✓
+- [x] `read_mark(index)` — seeks to `index * 24` in `column.mrk`, reads 24 bytes, deserializes.
+- [x] `read_granule(mark)` — seeks to `block_offset`, reads compressed-length header, reads + decompresses block, slices out granule bytes, casts to `Vec<i64>`.
 
-### Step 8 — Demo in `main.rs`
-- [ ] Create one column of each type, write, read back, print.
+*Rust lesson: `Seek`, `Read`, `lz4_flex::decompress_size_prepended`.*
 
 ---
 
 ## Deliberately deferred
-- **Metadata persistence** — `num_rows` and `dtype` not saved to disk yet (Phase 5: catalog).
-- **Multiple columns as a table** — also catalog.
-- **Compression, bit-packing, nulls** — optimizations, later.
-- **Variable-length strings** — fixed-size only for now; `VARCHAR` much later.
+- Multi-type columns (back-burner until this storage layer is solid)
+- Index / primary key lookups
+- Merging multiple parts (MergeTree merge step)
+- Compression codecs beyond LZ4 (ZSTD, Delta, DoubleDelta)
+- Null handling / sparse columns
+
+---
+
+## Appendix: Future Optimizations
+
+### A1 — Zero-copy buffering
+Currently, each `i64` value is copied from the input slice into the `Vec<u8>` buffer via `extend_from_slice`. Once the core functionality is stable and correct, explore eliminating this copy:
+- The input `&[i64]` is already a contiguous block of memory. With `bytemuck::cast_slice`, it can be reinterpreted as `&[u8]` directly (safe, no copy) and fed straight to the LZ4 compressor.
+- This only works cleanly when the input fits exactly into block boundaries; partial blocks at the end still need care.
+- **Do this only after the read/write round-trip is verified correct.**

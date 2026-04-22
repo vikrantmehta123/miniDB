@@ -1,29 +1,24 @@
-mod column;
-use column::Column;
-use std::path::Path;
+mod storage;
 
 fn main() -> std::io::Result<()> {
-    let path = Path::new("col_i64.bin");
-    let mut col = Column::open(path, 0);
+    let data: Vec<i64> = (0..10_000).map(|i| i as i64).collect();
+    let marks = storage::write_column(&data)?;
     
-    let data: Vec<i64> = (0..1500).map(|i| i as i64 * 10).collect();
+    println!("Total marks: {}", marks.len()); 
 
-    col.append_chunk(&data)?;
-    
-    println!("Wrote {} values", col.num_rows);
+   for (i, m) in marks.iter().enumerate() {
+       println!("Mark {:>2}  block_offset={:>6}  granule_offset={:>5}  num_rows={}",
+          i, m.block_offset, m.granule_offset, m.num_rows);
+   }
 
-    match col.read_chunk(0)? {
-        Some(chunk) =>  println!("Chunk 0: {} values, first={}, last={}", chunk.len(), chunk[0],
-  chunk[chunk.len()-1]),
-          None => println!("Chunk 0 not found"),
-    }
+    storage::write_marks(&marks)?;
+    println!("Wrote {} marks to column.mrk", marks.len());
 
-    match col.read_chunk(1)? {
-          Some(chunk) => println!("Chunk 1: {} values, first={}, last={}", chunk.len(), chunk[0],
-  chunk[chunk.len()-1]),
-          None => println!("Chunk 1 not found"),
-      }
+    let granule = storage::read_granule(&marks[2])?;
+    println!("Third granule: {} values, first={}, last={}",
+      granule.len(), granule[0], granule[granule.len()-1]);
 
+    println!("First 5 values: {:?}", &granule[..5]);
 
     Ok(())
 }
