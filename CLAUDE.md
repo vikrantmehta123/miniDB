@@ -19,27 +19,31 @@
 - Introduce concurrency (e.g., `rayon`, channels, `Arc<Mutex<>>`) when it fits naturally
 - Keep it simple — no premature abstractions
 
-## Likely Module Structure (evolves over time)
+## Current Module Structure
 ```
 src/
-  main.rs          # REPL / entry point
-  types.rs         # DataType enum, Value enum
-  column.rs        # Column and Chunk abstractions
-  storage/         # How chunks are stored on disk
-  catalog/         # Table and schema metadata
-  executor/        # Query execution (vectorized, chunk-at-a-time)
-  parser/          # Thin wrapper around the chosen SQL parser crate
+  main.rs       # CLI entry point — reads --type <name>, dispatches to run::<T>(), round-trip test
+  types.rs      # IDataType trait + impls for all 10 numeric types (i8/i16/i32/i64/u8/u16/u32/u64/f32/f64)
+  column.rs     # IColumn trait + generic ColumnVector<T: IDataType>
+  storage.rs    # write_column<T> and read_granule<T> — granule/mark/LZ4-compress pipeline
+```
+
+Future modules (not yet started):
+```
+  catalog/      # Table and schema metadata
+  executor/     # Query execution (vectorized, chunk-at-a-time)
+  parser/       # Thin wrapper around the chosen SQL parser crate
 ```
 
 ## Current Task
 - Active work is tracked in `TASK.md` at the repo root. Always read it at the start of a session to know what we're building next and which step we're on.
 
 ## Current Progress
-- `src/main.rs` implements chunk-based read/write for an `i64` column:
-  - `write_column(path, &[i64])` writes all values as little-endian bytes
-  - `read_chunks(path, chunk_index)` seeks to `chunk_index * CHUNK_SIZE * 8` and reads up to one chunk (1024 values)
-  - Partial final chunks are handled (reads only `bytes_read`)
-- No `Column` abstraction yet — logic lives as free functions scoped to `i64`.
+- **Storage pipeline fully generic across all 10 numeric types.**
+- `src/types.rs`: `IDataType` trait with `name()`, `size_of()`, `to_le_bytes_vec()`, `from_le_bytes()` — implemented for all numeric primitives.
+- `src/column.rs`: `IColumn` trait (`len`, `serialize_binary_bulk`, `deserialize_binary_bulk`) + `ColumnVector<T: IDataType>`.
+- `src/storage.rs`: `write_column<T>` (granule → buffer → LZ4 compress → write; emits marks) and `read_granule<T>` (decompress block → slice granule bytes → deserialize). Marks are three little-endian `u64`s (24 bytes each), type-agnostic.
+- `src/main.rs`: reads `--type <name>` CLI arg, dispatches to `run::<T>()` for the matching type, generates 10 000 values, writes, reads every granule back, asserts round-trip correctness.
 
 ## Build System
 - Standard `cargo` — `cargo build`, `cargo run`, `cargo test`
