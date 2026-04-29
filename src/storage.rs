@@ -1,6 +1,10 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 
+use crate::types::IDataType;
+use crate::column::{ColumnVector, IColumn};
+
+
 pub const GRANULE_SIZE: usize = 512;
 pub const BLOCK_BUFFER_SIZE: usize = 8 * 1024; // size of uncompressed buffer before compression
                                            // happens
@@ -12,7 +16,7 @@ pub struct Mark {
     pub num_rows: u64,
 }
 
-pub fn write_column(values: &[i64]) -> std::io::Result<Vec<Mark>> {
+pub fn write_column<T: IDataType>(col: &ColumnVector<T>) -> std::io::Result<Vec<Mark>> {
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
@@ -25,19 +29,21 @@ pub fn write_column(values: &[i64]) -> std::io::Result<Vec<Mark>> {
     let mut marks: Vec<Mark> =  Vec::new();
     let mut rows_in_buffer: usize = 0; // The number of i64 values in the buffer currently 
 
-    for &v in values {
+    let total = col.len();
+    let mut granule_start = 0;
 
-        // Emit a mark at the start of the granule
-        if rows_in_buffer % GRANULE_SIZE == 0 {
-            marks.push(Mark {
-                block_offset, 
-                granule_offset: (rows_in_buffer * 8) as u64,
-                num_rows: GRANULE_SIZE as u64 // Fixed number of rows in a granule
-            });
-        }   
+    while granule_start < total {
+        let limit = GRANULE_SIZE.min(total - granule_start);
 
-        buffer.extend_from_slice(&v.to_le_bytes());
-        rows_in_buffer += 1;
+        marks.push(Mark {
+            block_offset, 
+            granule_offset: (rows_in_buffer * T::size_of()) as u64,
+            num_rows: limit as u64 // Fixed number of rows in a granule
+        });
+        
+        col.serialize_binary_bulk(&mut buffer, granule_start, limit);
+        rows_in_buffer += limit;
+        granule_start += limit;
 
         if buffer.len() >= BLOCK_BUFFER_SIZE {
 
@@ -66,16 +72,6 @@ pub fn write_column(values: &[i64]) -> std::io::Result<Vec<Mark>> {
               block_offset, buffer.len(), compressed.len());
 
     }
-    
-    // Last granule can have < 512 rows. If so, we need to fix the num_rows 
-    let total = values.len();
-    let remainder = total % GRANULE_SIZE;
-    if remainder != 0 {
-        if let Some(last) = marks.last_mut() {
-            last.num_rows = remainder as u64;
-        }
-    }
-
 
     Ok(marks)
 }
@@ -97,7 +93,7 @@ pub fn write_marks(marks: &[Mark]) -> std::io::Result<()> {
 }
 
 
-pub fn read_granule(mark: &Mark) -> std::io::Result<Vec<i64>> {
+pub fn read_granule<T: IDataType>(mark: &Mark) -> std::io::Result<ColumnVector<T>> {
     let mut file = File::open("column.bin")?;
     file.seek(SeekFrom::Start(mark.block_offset))?;
 
@@ -115,12 +111,12 @@ pub fn read_granule(mark: &Mark) -> std::io::Result<Vec<i64>> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?; 
 
     let start = mark.granule_offset as usize;
-    let end = start + mark.num_rows as usize * 8;
+    let end = start + mark.num_rows as usize * T::size_of();
+    
+    let granule_bytes = &decompressed[start..end];
 
-    let values = decompressed[start..end]
-        .chunks_exact(8)
-        .map(|b| i64::from_le_bytes(b.try_into().unwrap()))
-        .collect();
+    let mut col: ColumnVector<T> = ColumnVector { data: Vec::new() };
+    col.deserialize_binary_bulk(granule_bytes);
 
-    Ok(values)
+    Ok(col)
 }
