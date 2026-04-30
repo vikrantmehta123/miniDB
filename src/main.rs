@@ -3,39 +3,43 @@ mod storage;
 mod data_type;
 mod column;
 
-use column::{IColumn, ColumnVector};
+use column::{IColumn};
 use data_type::{IDataType};
 use mark::{MarkReader};
+use storage::{ColumnWriter, ColumnReader};
 
 fn run<T: IDataType + PartialEq + std::fmt::Debug>() -> std::io::Result<()> {
     let num_values: usize = 10_000;
-    let mut col = ColumnVector::<T> {data: Vec::new()};
+    let mut writer = ColumnWriter::create("column.bin", "column.mrk")?;
 
     for i in 0..num_values {
         let val = (i) as u64;
         let all_bytes = val.to_le_bytes();
-        col.data.push(T::from_le_bytes(&all_bytes[..T::size_of()]));
+        writer.push(T::from_le_bytes(&all_bytes[..T::size_of()]));
     }
-    println!("Generated {} values", col.len());
 
-    storage::write_column(&col)?;
+    writer.flush()?;
+
     let marks = MarkReader::open("column.mrk")?.read_all()?;
     
     println!("Read {} marks from column.mrk", marks.len());
 
+    let mut reader = ColumnReader::open("column.bin", "column.mrk")?;
+    let granules: Vec<column::ColumnVector<T>> = reader.read_all()?;
+
+    println!("Read {} granules", granules.len());
+      
     let mut row = 0usize;
-    for (i, mark) in marks.iter().enumerate() {
-        let granule: ColumnVector<T> = storage::read_granule(mark)?;                                        
+    for (i, granule) in granules.iter().enumerate() {
         println!("  Read granule {}: {} values", i, granule.len());
         for (j, val) in granule.data.iter().enumerate() {
-            assert_eq!(val, &col.data[row], "Mismatch at granule {} row {}", i, j);
-            row += 1;                                                                                         
-        }       
+            let expected = T::from_le_bytes(&(row as u64).to_le_bytes()[..T::size_of()]);
+            assert_eq!(val, &expected, "Mismatch at granule {} row {}", i, j);
+            row += 1;
+        }
     }
 
-    let target = 0usize;                                                                                    
-    let granule: ColumnVector<T> = storage::read_granule(&marks[target])?;                                  
-    println!("Direct read granule {}: first value = {:?}", target, granule.data);
+    println!("Granule Data: {:?}", granules[1].data);
 
 
     Ok(())

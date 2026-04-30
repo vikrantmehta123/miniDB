@@ -7,7 +7,7 @@
 ## Core Design Decisions
 - **Columnar storage**: data stored column-by-column, not row-by-row
 - **Chunk size**: 1024 values per chunk (the atomic unit of processing)
-- **Supported types**: all numeric types (`i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `f32`, `f64`), `bool`, fixed-size strings
+- **Supported types**: all numeric types (`i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `f32`, `f64`), `bool`, variable-length strings
 - **Disk-persistent**: data lives on disk, not in memory — no in-memory-only database
 - **No custom parser**: use an off-the-shelf SQL parser crate
 - **Features evolve as we write code** — don't over-plan
@@ -25,7 +25,7 @@ src/
   main.rs        # CLI entry point — reads --type <name>, dispatches to run::<T>(), round-trip test
   data_type.rs   # IDataType trait + impls for all 10 numeric types (i8/i16/i32/i64/u8/u16/u32/u64/f32/f64)
   column.rs      # IColumn trait + generic ColumnVector<T: IDataType>
-  storage.rs     # write_column<T> and read_granule<T> — granule/LZ4-compress pipeline
+  storage.rs     # ColumnWriter<T> (push/flush) and ColumnReader (read_granule/read_all) — granule/LZ4-compress pipeline with single-block cache
   mark.rs        # Mark struct, MarkWriter (buffered), MarkReader
 ```
 
@@ -38,14 +38,15 @@ Future modules (not yet started):
 
 ## Current Task
 - Active work is tracked in `TASK.md` at the repo root. Always read it at the start of a session to know what we're building next and which step we're on.
+- Feature scope and phasing is in `SPEC.md` at the repo root. Read it for context on what Phase 1 covers and what is deferred to Phase 2.
 
 ## Current Progress
-- **Storage pipeline fully generic across all 10 numeric types. Mark IO extracted into its own module.**
+- **Storage layer fully restructured. ColumnWriter and ColumnReader replace free functions.**
 - `src/data_type.rs`: `IDataType` trait with `name()`, `size_of()`, `to_le_bytes_vec()`, `from_le_bytes()` — implemented for all numeric primitives.
 - `src/column.rs`: `IColumn` trait (`len`, `serialize_binary_bulk`, `deserialize_binary_bulk`) + `ColumnVector<T: IDataType>`.
 - `src/mark.rs`: `Mark` struct with `to_bytes()`/`from_bytes()`; `MarkWriter` (buffers all marks in memory, single `flush()` write); `MarkReader` (`read_all()` reads entire `.mrk` file at once).
-- `src/storage.rs`: `write_column<T>` (granule → buffer → LZ4 compress → write block; uses `MarkWriter`) and `read_granule<T>` (decompress block → slice granule bytes → deserialize).
-- `src/main.rs`: reads `--type <name>` CLI arg, dispatches to `run::<T>()`, generates 10 000 values, writes column + marks, reads marks back via `MarkReader`, asserts round-trip correctness.
+- `src/storage.rs`: `ColumnWriter<T>` (`push(val: T)`, `flush()` — granule loop → LZ4 compress → write block); `ColumnReader` (no struct-level generic; `read_granule<T>` with single-block decompression cache keyed on `block_offset`, `read_all<T>`).
+- `src/main.rs`: reads `--type <name>` CLI arg, dispatches to `run::<T>()`, generates 10 000 values via `ColumnWriter`, reads all granules back via `ColumnReader::read_all`, asserts round-trip correctness.
 
 ## Build System
 - Standard `cargo` — `cargo build`, `cargo run`, `cargo test`

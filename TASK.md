@@ -21,13 +21,15 @@ Restructure `src/storage.rs` for clarity and extensibility. Extract `Mark` into 
 - [x] `MarkReader { file: File }` with `read_all() -> Result<Vec<Mark>>`
 - [x] `storage.rs` uses `MarkWriter` inside `write_column`; `main.rs` uses `MarkReader` to load marks after writing
 
-### Step 2 — Introduce `ColumnWriter<T>` and `ColumnReader<T>` in `src/storage.rs`
-- [ ] `ColumnWriter<T: IDataType> { col: ColumnVector<T>, mark_writer: MarkWriter, data_file: File }`
+### Step 2 — Introduce `ColumnWriter<T>` and `ColumnReader` in `src/storage.rs` ✓ DONE
+- [x] `ColumnWriter<T: IDataType> { col: ColumnVector<T>, mark_writer: MarkWriter, data_file: File }`
+  - `push(&mut self, val: T)`: appends a value into the internal column
   - `flush(&mut self) -> Result<()>`: granule loop → `serialize_binary_bulk` → LZ4 compress → write block → `mark_writer.write(mark)`
-- [ ] `ColumnReader<T: IDataType> { mark_reader: MarkReader, data_file: File }`
-  - `read_granule(&mut self, mark: &Mark) -> Result<ColumnVector<T>>`: seek → read compressed bytes → decompress → deserialize
-  - `read_all(&mut self) -> Result<Vec<ColumnVector<T>>>`: `mark_reader.read_all()` then `read_granule` for each
-- [ ] Update `main.rs` to use the new structs
+- [x] `ColumnReader { mark_reader: MarkReader, data_file: File, block_cache: Option<(u64, Vec<u8>)> }` (no struct-level generic — type only at method level)
+  - `read_granule<T: IDataType>(&mut self, mark: &Mark) -> Result<ColumnVector<T>>`: check cache by block_offset → on miss: seek → read compressed bytes → decompress → cache; slice granule from decompressed bytes → deserialize
+  - `read_all<T: IDataType>(&mut self) -> Result<Vec<ColumnVector<T>>>`: `mark_reader.read_all()` then `read_granule` for each
+- [x] Update `main.rs` write path to use `ColumnWriter`
+- [x] Update `main.rs` read path to use `ColumnReader`
 
 ---
 
