@@ -1,7 +1,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use crate::types::IDataType;
+use crate::data_type::IDataType;
 use crate::column::{ColumnVector, IColumn};
 
 

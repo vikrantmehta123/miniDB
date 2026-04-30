@@ -1,9 +1,9 @@
 mod storage;
-mod types;
+mod data_type;
 mod column;
 
 use column::{IColumn, ColumnVector};
-use types::{IDataType};
+use data_type::{IDataType};
 
 fn run<T: IDataType + PartialEq + std::fmt::Debug>() -> std::io::Result<()> {
     let num_values: usize = 10_000;

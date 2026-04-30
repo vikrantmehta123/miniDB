@@ -1,4 +1,4 @@
-use crate::types::IDataType;
+use crate::data_type::IDataType;
 
 pub trait IColumn {
     fn len(&self) -> usize;
