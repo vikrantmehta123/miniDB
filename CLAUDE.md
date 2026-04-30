@@ -22,11 +22,13 @@
 ## Current Module Structure
 ```
 src/
-  main.rs        # CLI entry point — reads --type <name>, dispatches to run::<T>(), round-trip test
-  data_type.rs   # IDataType trait + impls for all 10 numeric types (i8/i16/i32/i64/u8/u16/u32/u64/f32/f64)
-  column.rs      # IColumn trait + generic ColumnVector<T: IDataType>
-  storage.rs     # ColumnWriter<T> (push/flush) and ColumnReader (read_granule/read_all) — granule/LZ4-compress pipeline with single-block cache
-  mark.rs        # Mark struct, MarkWriter (buffered), MarkReader
+  main.rs           # CLI entry point — dispatches to run::<T>() for numerics, run_string() for strings
+  config.rs         # GRANULE_SIZE (512) and BLOCK_BUFFER_SIZE (8KB) constants
+  data_type.rs      # IDataType trait + impls for all 10 numeric types (i8/i16/i32/i64/u8/u16/u32/u64/f32/f64)
+  column.rs         # IColumn trait + generic ColumnVector<T: IDataType>
+  storage.rs        # ColumnWriter<T> (push/flush) and ColumnReader (read_granule/read_all) — granule/LZ4-compress pipeline with single-block cache
+  mark.rs           # Mark struct, MarkWriter (buffered), MarkReader
+  string_column.rs  # StringColumn, StringColumnWriter (push/flush) and StringColumnReader (read_granule/read_all) — same pipeline, dual granule boundary (count + byte size)
 ```
 
 Future modules (not yet started):
@@ -41,12 +43,14 @@ Future modules (not yet started):
 - Feature scope and phasing is in `SPEC.md` at the repo root. Read it for context on what Phase 1 covers and what is deferred to Phase 2.
 
 ## Current Progress
-- **Storage layer fully restructured. ColumnWriter and ColumnReader replace free functions.**
+- **Variable-length string column fully implemented and round-trip verified.**
+- `src/config.rs`: `GRANULE_SIZE = 512`, `BLOCK_BUFFER_SIZE = 8KB` — shared by numeric and string storage.
 - `src/data_type.rs`: `IDataType` trait with `name()`, `size_of()`, `to_le_bytes_vec()`, `from_le_bytes()` — implemented for all numeric primitives.
 - `src/column.rs`: `IColumn` trait (`len`, `serialize_binary_bulk`, `deserialize_binary_bulk`) + `ColumnVector<T: IDataType>`.
 - `src/mark.rs`: `Mark` struct with `to_bytes()`/`from_bytes()`; `MarkWriter` (buffers all marks in memory, single `flush()` write); `MarkReader` (`read_all()` reads entire `.mrk` file at once).
 - `src/storage.rs`: `ColumnWriter<T>` (`push(val: T)`, `flush()` — granule loop → LZ4 compress → write block); `ColumnReader` (no struct-level generic; `read_granule<T>` with single-block decompression cache keyed on `block_offset`, `read_all<T>`).
-- `src/main.rs`: reads `--type <name>` CLI arg, dispatches to `run::<T>()`, generates 10 000 values via `ColumnWriter`, reads all granules back via `ColumnReader::read_all`, asserts round-trip correctness.
+- `src/string_column.rs`: `StringColumn { data: Vec<String> }`; `StringColumnWriter` (`push`, `flush` — dual granule boundary: 512 strings or 8KB, whichever comes first; strings never split across blocks); `StringColumnReader` (`read_granule` → `StringColumn`, single-block cache, sequential `i32`-prefixed deserialization; `read_all`). `String` does not implement `IColumn` — `StringColumn` is a parallel but separate type.
+- `src/main.rs`: `run::<T>()` for all 10 numeric types; `run_string()` for strings — both assert round-trip correctness.
 
 ## Build System
 - Standard `cargo` — `cargo build`, `cargo run`, `cargo test`
