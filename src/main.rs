@@ -4,6 +4,7 @@ mod data_type;
 mod column;
 mod string_column;
 mod config;
+mod schema;
 
 use column::{IColumn};
 use data_type::{IDataType};
@@ -97,6 +98,7 @@ fn main() -> std::io::Result<()>{
         "u64" => run::<u64>(),                                                                                
         "f32" => run::<f32>(),                                                                                
         "f64" => run::<f64>(),
+        "bool" => run::<bool>(),
         "string" => run_string(),
         _     => panic!("Unknown type: {}", type_name), 
     }?;

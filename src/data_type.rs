@@ -128,3 +128,14 @@ impl IDataType for u64 {
 }
 
 
+impl IDataType for bool {
+    fn name() -> &'static str { "Bool" }
+    fn size_of() -> usize { 1 } 
+    fn to_le_bytes_vec(&self) -> Vec<u8> {
+        vec![*self as u8]
+    }
+    fn from_le_bytes(bytes: &[u8]) -> Self {
+        bytes[0] != 0
+    }
+}
+
