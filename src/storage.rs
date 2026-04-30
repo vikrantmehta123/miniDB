@@ -5,8 +5,7 @@ use crate::data_type::IDataType;
 use crate::column::{ColumnVector, IColumn};
 use crate::mark::{Mark, MarkReader, MarkWriter};
 
-pub const GRANULE_SIZE: usize = 512;
-pub const BLOCK_BUFFER_SIZE: usize = 8 * 1024; // size of uncompressed buffer before compression happens
+use crate::config::{GRANULE_SIZE, BLOCK_BUFFER_SIZE};
 
 
 pub struct ColumnWriter<T: IDataType> {

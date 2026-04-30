@@ -2,11 +2,48 @@ mod mark;
 mod storage;
 mod data_type;
 mod column;
+mod string_column;
+mod config;
 
 use column::{IColumn};
 use data_type::{IDataType};
 use mark::{MarkReader};
 use storage::{ColumnWriter, ColumnReader};
+use string_column::{StringColumnWriter, StringColumnReader};
+
+
+fn run_string() -> std::io::Result<()> {
+    let num_values = 2000;
+    let mut writer = StringColumnWriter::create("string_column.bin", "string_column.mrk")?;
+
+    let mut expected: Vec<String> = Vec::new();
+    for i in 0..num_values {
+        let s = format!("row_{}", i);
+        expected.push(s.clone());
+        writer.push(s);
+    }
+    writer.flush()?;
+
+    let mut reader = StringColumnReader::open("string_column.bin", "string_column.mrk")?;
+    let granules = reader.read_all()?;
+
+    println!("Read {} granules", granules.len());
+    println!("Granule Data: {:?}", granules[1].data);
+
+    let mut row = 0usize;
+    for (i, granule) in granules.iter().enumerate() {
+        println!("  Granule {}: {} strings", i, granule.data.len());
+        for (j, val) in granule.data.iter().enumerate() {
+            assert_eq!(val, &expected[row], "Mismatch at granule {} row {}", i, j);
+            row += 1;
+        }
+    }
+
+    println!("Round-trip OK: {} strings verified", row);
+    Ok(())
+}
+
+
 
 fn run<T: IDataType + PartialEq + std::fmt::Debug>() -> std::io::Result<()> {
     let num_values: usize = 10_000;
@@ -60,6 +97,7 @@ fn main() -> std::io::Result<()>{
         "u64" => run::<u64>(),                                                                                
         "f32" => run::<f32>(),                                                                                
         "f64" => run::<f64>(),
+        "string" => run_string(),
         _     => panic!("Unknown type: {}", type_name), 
     }?;
     Ok(())
