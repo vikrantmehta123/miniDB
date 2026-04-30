@@ -3,30 +3,23 @@ use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::data_type::IDataType;
 use crate::column::{ColumnVector, IColumn};
-
+use crate::mark::{Mark, MarkWriter};
 
 pub const GRANULE_SIZE: usize = 512;
 pub const BLOCK_BUFFER_SIZE: usize = 8 * 1024; // size of uncompressed buffer before compression
                                            // happens
 
-
-pub struct Mark {
-    pub block_offset: u64,
-    pub granule_offset: u64,
-    pub num_rows: u64,
-}
-
-pub fn write_column<T: IDataType>(col: &ColumnVector<T>) -> std::io::Result<Vec<Mark>> {
+pub fn write_column<T: IDataType>(col: &ColumnVector<T>) -> std::io::Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .open("column.bin")?;
 
+    let mut mark_writer = MarkWriter::create("column.mrk")?;
+
     let mut buffer: Vec<u8> = Vec::with_capacity(BLOCK_BUFFER_SIZE);
     let mut block_offset: u64 = 0;
-
-    let mut marks: Vec<Mark> =  Vec::new();
     let mut rows_in_buffer: usize = 0; // The number of i64 values in the buffer currently 
 
     let total = col.len();
@@ -34,8 +27,8 @@ pub fn write_column<T: IDataType>(col: &ColumnVector<T>) -> std::io::Result<Vec<
 
     while granule_start < total {
         let limit = GRANULE_SIZE.min(total - granule_start);
-
-        marks.push(Mark {
+        
+        mark_writer.write(&Mark {
             block_offset, 
             granule_offset: (rows_in_buffer * T::size_of()) as u64,
             num_rows: limit as u64 // Fixed number of rows in a granule
@@ -72,26 +65,9 @@ pub fn write_column<T: IDataType>(col: &ColumnVector<T>) -> std::io::Result<Vec<
               block_offset, buffer.len(), compressed.len());
 
     }
-
-    Ok(marks)
-}
-
-pub fn write_marks(marks: &[Mark]) -> std::io::Result<()> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open("column.mrk")?;
-
-    for mark in marks {
-        file.write_all(&mark.block_offset.to_le_bytes())?;
-        file.write_all(&mark.granule_offset.to_le_bytes())?;
-        file.write_all(&mark.num_rows.to_le_bytes())?;
-    }
-
+    mark_writer.flush()?;
     Ok(())
 }
-
 
 pub fn read_granule<T: IDataType>(mark: &Mark) -> std::io::Result<ColumnVector<T>> {
     let mut file = File::open("column.bin")?;

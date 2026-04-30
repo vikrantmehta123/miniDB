@@ -1,9 +1,11 @@
+mod mark;
 mod storage;
 mod data_type;
 mod column;
 
 use column::{IColumn, ColumnVector};
 use data_type::{IDataType};
+use mark::{MarkReader};
 
 fn run<T: IDataType + PartialEq + std::fmt::Debug>() -> std::io::Result<()> {
     let num_values: usize = 10_000;
@@ -16,11 +18,10 @@ fn run<T: IDataType + PartialEq + std::fmt::Debug>() -> std::io::Result<()> {
     }
     println!("Generated {} values", col.len());
 
-    let marks = storage::write_column(&col)?;
-    println!("Wrote column.bin: {} granules", marks.len());
-
-    storage::write_marks(&marks)?;
-    println!("Wrote column.mrk");
+    storage::write_column(&col)?;
+    let marks = MarkReader::open("column.mrk")?.read_all()?;
+    
+    println!("Read {} marks from column.mrk", marks.len());
 
     let mut row = 0usize;
     for (i, mark) in marks.iter().enumerate() {

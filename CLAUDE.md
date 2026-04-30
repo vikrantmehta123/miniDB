@@ -22,10 +22,11 @@
 ## Current Module Structure
 ```
 src/
-  main.rs       # CLI entry point — reads --type <name>, dispatches to run::<T>(), round-trip test
-  types.rs      # IDataType trait + impls for all 10 numeric types (i8/i16/i32/i64/u8/u16/u32/u64/f32/f64)
-  column.rs     # IColumn trait + generic ColumnVector<T: IDataType>
-  storage.rs    # write_column<T> and read_granule<T> — granule/mark/LZ4-compress pipeline
+  main.rs        # CLI entry point — reads --type <name>, dispatches to run::<T>(), round-trip test
+  data_type.rs   # IDataType trait + impls for all 10 numeric types (i8/i16/i32/i64/u8/u16/u32/u64/f32/f64)
+  column.rs      # IColumn trait + generic ColumnVector<T: IDataType>
+  storage.rs     # write_column<T> and read_granule<T> — granule/LZ4-compress pipeline
+  mark.rs        # Mark struct, MarkWriter (buffered), MarkReader
 ```
 
 Future modules (not yet started):
@@ -39,11 +40,12 @@ Future modules (not yet started):
 - Active work is tracked in `TASK.md` at the repo root. Always read it at the start of a session to know what we're building next and which step we're on.
 
 ## Current Progress
-- **Storage pipeline fully generic across all 10 numeric types.**
-- `src/types.rs`: `IDataType` trait with `name()`, `size_of()`, `to_le_bytes_vec()`, `from_le_bytes()` — implemented for all numeric primitives.
+- **Storage pipeline fully generic across all 10 numeric types. Mark IO extracted into its own module.**
+- `src/data_type.rs`: `IDataType` trait with `name()`, `size_of()`, `to_le_bytes_vec()`, `from_le_bytes()` — implemented for all numeric primitives.
 - `src/column.rs`: `IColumn` trait (`len`, `serialize_binary_bulk`, `deserialize_binary_bulk`) + `ColumnVector<T: IDataType>`.
-- `src/storage.rs`: `write_column<T>` (granule → buffer → LZ4 compress → write; emits marks) and `read_granule<T>` (decompress block → slice granule bytes → deserialize). Marks are three little-endian `u64`s (24 bytes each), type-agnostic.
-- `src/main.rs`: reads `--type <name>` CLI arg, dispatches to `run::<T>()` for the matching type, generates 10 000 values, writes, reads every granule back, asserts round-trip correctness.
+- `src/mark.rs`: `Mark` struct with `to_bytes()`/`from_bytes()`; `MarkWriter` (buffers all marks in memory, single `flush()` write); `MarkReader` (`read_all()` reads entire `.mrk` file at once).
+- `src/storage.rs`: `write_column<T>` (granule → buffer → LZ4 compress → write block; uses `MarkWriter`) and `read_granule<T>` (decompress block → slice granule bytes → deserialize).
+- `src/main.rs`: reads `--type <name>` CLI arg, dispatches to `run::<T>()`, generates 10 000 values, writes column + marks, reads marks back via `MarkReader`, asserts round-trip correctness.
 
 ## Build System
 - Standard `cargo` — `cargo build`, `cargo run`, `cargo test`
