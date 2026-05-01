@@ -1,5 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::path::Path;
 
 pub struct Mark {
     pub block_offset: u64,
@@ -33,7 +34,7 @@ pub struct MarkWriter {
 }
 
 impl MarkWriter {
-    pub fn create(path: &str) -> std::io::Result<Self> {
+    pub fn create(path: &Path) -> std::io::Result<Self> {
         let file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -58,7 +59,7 @@ pub struct MarkReader {
 }
 
 impl MarkReader {
-    pub fn open(path: &str) -> std::io::Result<Self> {
+    pub fn open(path: &Path) -> std::io::Result<Self> {
 
         Ok(MarkReader { file: File::open(path)? })
     }

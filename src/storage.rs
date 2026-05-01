@@ -1,5 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path};
 
 use crate::data_type::IDataType;
 use crate::column::{ColumnVector, IColumn};
@@ -15,7 +16,7 @@ pub struct ColumnWriter<T: IDataType> {
 }
 
 impl<T: IDataType> ColumnWriter<T> {
-    pub fn create(data_path: &str, mark_path: &str) -> std::io::Result<Self>{
+    pub fn create(data_path: &Path, mark_path: &Path) -> std::io::Result<Self>{
         let data_file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -97,7 +98,7 @@ pub struct ColumnReader {
 }
 
 impl ColumnReader {
-    pub fn open(data_path: &str, mark_path: &str) -> std::io::Result<Self>{
+    pub fn open(data_path: &Path, mark_path: &Path) -> std::io::Result<Self>{
         Ok(ColumnReader { 
             data_file: File::open(data_path)?, 
             mark_reader: MarkReader::open(mark_path)?, 

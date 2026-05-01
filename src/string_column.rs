@@ -2,6 +2,7 @@ use crate::config::{BLOCK_BUFFER_SIZE, GRANULE_SIZE};
 use crate::mark::{Mark, MarkReader, MarkWriter};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::Path;
 
 pub struct StringColumn {
     pub data: Vec<String>,
@@ -21,7 +22,7 @@ pub struct StringColumnReader {
 }
 
 impl StringColumnWriter {
-    pub fn create(data_path: &str, mark_path: &str) -> std::io::Result<Self> {
+    pub fn create(data_path: &Path, mark_path: &Path) -> std::io::Result<Self> {
         let data_file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -52,7 +53,7 @@ impl StringColumnWriter {
             let count = i - granule_start + 1;
 
             // Seal the granule if we hit the count limit/byte size limit
-            if count >= GRANULE_SIZE || granule_bytes >= BLOCK_BUFFER_SIZE {
+            if count >= GRANULE_SIZE {
                 self.mark_writer.write(&Mark {
                     block_offset,
                     granule_offset: bytes_in_block as u64,
@@ -109,7 +110,7 @@ impl StringColumnWriter {
 }
 
 impl StringColumnReader {
-    pub fn open(data_path: &str, mark_path: &str) -> std::io::Result<Self> {
+    pub fn open(data_path: &Path, mark_path: &Path) -> std::io::Result<Self> {
         Ok(StringColumnReader {
             data_file: File::open(data_path)?,
             mark_reader: MarkReader::open(mark_path)?,

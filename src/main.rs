@@ -6,6 +6,7 @@ mod string_column;
 mod config;
 mod schema;
 mod part;
+mod table;
 
 use std::path::{Path};
 use column::{IColumn};
@@ -15,6 +16,15 @@ use storage::{ColumnWriter, ColumnReader};
 use string_column::{StringColumnWriter, StringColumnReader};
 use schema::{TableDef, ColumnDef, DataType};
 use part::{Part};
+use table::TableWriter;
+
+fn run_table_writer() -> std::io::Result<()> {
+    let table_dir = Path::new("data/events");
+    let writer = TableWriter::create(table_dir)?;
+    println!("Created part at: {}", writer.part.dir.display());
+    println!("Columns: {}", writer.def.columns.len());
+    Ok(())
+}
 
 
 fn run_part() -> std::io::Result<()> {
@@ -46,7 +56,7 @@ fn run_part() -> std::io::Result<()> {
 
 fn run_string() -> std::io::Result<()> {
     let num_values = 2000;
-    let mut writer = StringColumnWriter::create("string_column.bin", "string_column.mrk")?;
+    let mut writer = StringColumnWriter::create(Path::new("string_column.bin"), Path::new("string_column.mrk"))?;
 
     let mut expected: Vec<String> = Vec::new();
     for i in 0..num_values {
@@ -56,7 +66,7 @@ fn run_string() -> std::io::Result<()> {
     }
     writer.flush()?;
 
-    let mut reader = StringColumnReader::open("string_column.bin", "string_column.mrk")?;
+    let mut reader = StringColumnReader::open(Path::new("string_column.bin"), Path::new("string_column.mrk"))?;
     let granules = reader.read_all()?;
 
     println!("Read {} granules", granules.len());
@@ -79,7 +89,7 @@ fn run_string() -> std::io::Result<()> {
 
 fn run<T: IDataType + PartialEq + std::fmt::Debug>() -> std::io::Result<()> {
     let num_values: usize = 10_000;
-    let mut writer = ColumnWriter::create("column.bin", "column.mrk")?;
+    let mut writer = ColumnWriter::create(Path::new("column.bin"), Path::new("column.mrk"))?;
 
     for i in 0..num_values {
         let val = (i) as u64;
@@ -89,11 +99,11 @@ fn run<T: IDataType + PartialEq + std::fmt::Debug>() -> std::io::Result<()> {
 
     writer.flush()?;
 
-    let marks = MarkReader::open("column.mrk")?.read_all()?;
+    let marks = MarkReader::open(Path::new("column.mrk"))?.read_all()?;
     
     println!("Read {} marks from column.mrk", marks.len());
 
-    let mut reader = ColumnReader::open("column.bin", "column.mrk")?;
+    let mut reader = ColumnReader::open(Path::new("column.bin"), Path::new("column.mrk"))?;
     let granules: Vec<column::ColumnVector<T>> = reader.read_all()?;
 
     println!("Read {} granules", granules.len());
@@ -132,6 +142,7 @@ fn main() -> std::io::Result<()>{
         "bool" => run::<bool>(),
         "string" => run_string(),
         "part" => run_part(),
+        "table" => run_table_writer(),
         _     => panic!("Unknown type: {}", type_name), 
     }?;
     Ok(())
