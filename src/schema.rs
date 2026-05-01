@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum DataType {
@@ -33,7 +33,7 @@ pub struct TableDef {
 
 impl TableDef {
     pub fn create(dir: &Path, def: &TableDef) -> std::io::Result<()> {
-        fs::create_dir(dir)?;
+        fs::create_dir_all(dir)?;
         let schema_path = dir.join("schema.json");
         let json = serde_json::to_string_pretty(def)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -46,6 +46,10 @@ impl TableDef {
         let json = fs::read_to_string(schema_path)?;
         serde_json::from_str(&json)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    pub fn part_dir(table_dir: &Path, part_id: u32) -> PathBuf {
+        table_dir.join(format!("part_{:05}", part_id))
     }
 }
 

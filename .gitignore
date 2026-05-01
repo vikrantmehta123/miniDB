@@ -1,3 +1,4 @@
 /target
 *.mrk
 *.bin
+/data

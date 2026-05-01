@@ -1,56 +1,5 @@
 # Current Tasks
 
-## Step 4 — Table and Part Directory Layout
-
-Now that the schema is solid, define the on-disk directory structure for a table and its parts. This is the foundation everything else (writing, reading, merging) builds on.
-
-### Concept
-
-A **part** is an immutable batch of rows written in one INSERT. Each part is a directory containing one binary file per column. Parts are never modified after creation — new inserts create new parts, and merges produce new parts from old ones.
-
-### Directory layout
-
-```
-data/
-  <table_name>/
-    schema.json
-    <part_id>/
-        <column_name>.bin
-        <column_name>.mrk
-```
-
-- `data/` — root data directory, configurable
-- `<table_name>/` — one directory per table; `schema.json` lives here
-- `<part_id>/` — one directory per part, e.g. `part_00001`; named by a monotonically increasing counter
-- `<column_name>.bin` / `.mrk` — one pair of files per column, named after the column
-
-### What to build
-
-A `Part` struct in `schema.rs` (or a new `part.rs`) that encapsulates path logic:
-
-```rust
-pub struct Part {
-    pub dir: PathBuf,   // e.g. data/events/part_00001
-}
-
-impl Part {
-    pub fn column_bin_path(&self, col: &ColumnDef) -> PathBuf;
-    pub fn column_mrk_path(&self, col: &ColumnDef) -> PathBuf;
-}
-```
-
-And a helper on `TableDef` to resolve part paths:
-
-```rust
-impl TableDef {
-    pub fn part_dir(table_dir: &Path, part_id: u32) -> PathBuf;
-}
-```
-
-No reading or writing of actual column data yet — just the path logic and directory creation.
-
----
-
 ## Step 5 — TableWriter
 
 Takes a `TableDef` and a table directory. On `create()`, allocates the next part directory (`part_00001`, `part_00002`, …) and opens one writer per column, dispatching on `DataType`:

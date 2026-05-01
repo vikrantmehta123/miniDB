@@ -5,12 +5,43 @@ mod column;
 mod string_column;
 mod config;
 mod schema;
+mod part;
 
+use std::path::{Path};
 use column::{IColumn};
 use data_type::{IDataType};
 use mark::{MarkReader};
 use storage::{ColumnWriter, ColumnReader};
 use string_column::{StringColumnWriter, StringColumnReader};
+use schema::{TableDef, ColumnDef, DataType};
+use part::{Part};
+
+
+fn run_part() -> std::io::Result<()> {
+    let table_dir = Path::new("data/events");
+    let def = TableDef {
+        name: "events".to_string(),
+        columns: vec![
+            ColumnDef { name: "timestamp".to_string(), data_type: DataType::I64 },
+            ColumnDef { name: "user_id".to_string(),   data_type: DataType::U32 },
+            ColumnDef { name: "label".to_string(),     data_type: DataType::Str },
+        ],
+        sort_key: vec![0],
+    };
+
+    TableDef::create(table_dir, &def)?;
+
+    let part_dir = TableDef::part_dir(table_dir, 1);
+    let part = Part::new(part_dir);
+    part.create_dir()?;
+
+    for col in &def.columns {
+        println!("{}", part.column_bin_path(col).display());
+        println!("{}", part.column_mrk_path(col).display());
+    }
+
+    Ok(())
+}
 
 
 fn run_string() -> std::io::Result<()> {
@@ -100,6 +131,7 @@ fn main() -> std::io::Result<()>{
         "f64" => run::<f64>(),
         "bool" => run::<bool>(),
         "string" => run_string(),
+        "part" => run_part(),
         _     => panic!("Unknown type: {}", type_name), 
     }?;
     Ok(())
