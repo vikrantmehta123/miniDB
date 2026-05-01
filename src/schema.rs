@@ -2,23 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-
-pub enum ColumnChunk {
-    I8(Vec<i8>),
-    I16(Vec<i16>),
-    I32(Vec<i32>),
-    I64(Vec<i64>),
-    U8(Vec<u8>),
-    U16(Vec<u16>),
-    U32(Vec<u32>),
-    U64(Vec<u64>),
-    F32(Vec<f32>),
-    F64(Vec<f64>),
-    Bool(Vec<bool>),
-    Str(Vec<String>),
-}
-
-
 #[derive(Debug, Serialize, Deserialize)]
 pub enum DataType {
     I8,
@@ -34,22 +17,6 @@ pub enum DataType {
     Bool,
     Str,
 }
-
-pub enum Value {
-    I8(i8),
-    I16(i16),
-    I32(i32),
-    I64(i64),
-    U8(u8),
-    U16(u16),
-    U32(u32),
-    U64(u64),
-    F32(f32),
-    F64(f64),
-    Bool(bool),
-    Str(String),
-}
-
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ColumnDef {
