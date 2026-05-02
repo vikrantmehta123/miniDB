@@ -11,6 +11,7 @@
 - **Supported types**: all numeric types (`i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `f32`, `f64`), `bool`, variable-length strings
 - **Insert API is column-oriented**: `TableWriter::insert(Vec<ColumnChunk>)` — the caller transposes rows into columns. `ColumnChunk` is an enum with one variant per supported type.
 - **One INSERT = one part**: parts are immutable directories `part_NNNNN/` containing per-column `<col>.bin` (compressed data) and `<col>.mrk` (granule index). Writes go to `tmp_part_NNNNN/` and are atomically renamed on success.
+- **Encoding library** (`src/encoding/`): standalone codecs (`Plain`, `Delta`, `RLE`) over a sealed `Primitive` trait, dispatched by the `Codec` enum. Not yet wired into column writers.
 - **Disk-persistent**: data lives on disk, not in memory — no in-memory-only database
 - **No custom parser**: use an off-the-shelf SQL parser crate
 - **Features evolve as we write code** — don't over-plan

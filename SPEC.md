@@ -7,7 +7,7 @@
 1. **Abstractions**: `ColumnWriter`, `ColumnReader`, `TableWriter`, `TableReader` with LZ4 compression.
 2. **Data types**: integers (`i8`–`u64`), `f32`/`f64`, `bool`, variable-length strings.
 3. **Schema**: single table, frozen at startup. One column designated as the primary key (sort key).
-4. Add other encoding schemes like Delta, RLE, Dictionary?.
+4. Add other encoding schemes like Delta, RLE.
 
 ### Query Processing & Executor
 
@@ -33,7 +33,7 @@ SELECT x, y, agg(z) FROM defaulttable WHERE <cond> GROUP BY <cols> HAVING <cond>
 2. **External merge sort**: merge algorithm for parts that exceed memory.
 3. **Merge scheduler**: background thread that triggers merges on part count / size thresholds.
 4. **Partitioning**: data partitioned by a single column (e.g. a date). Each partition is an independent directory of parts.
-
+5. LowCardinality(String) type. And dictionary encoding for the same.
 ---
 
 ## Out of scope

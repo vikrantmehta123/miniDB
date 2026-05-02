@@ -1,3 +1,4 @@
+//! Run Length Encoding
 //! Format: [count: u16 LE][value: T LE] pairs.
 //!
 //! `count` is u16 because at the current 32 KiB raw block buffer, the most
