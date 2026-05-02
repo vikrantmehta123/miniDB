@@ -94,7 +94,8 @@ impl<T: IDataType> ColumnWriter<T> {
         self.flush_block()?;
 
         self.bin.flush()?;
-        let bin_bytes = self.bin.get_ref().metadata()?.len();
+        let bin_bytes: u64 = self.bin.stream_position()?;
+        self.bin.get_ref().sync_all()?;
         self.marks.flush()?;
 
         Ok(ColumnStats {

@@ -1,21 +1,21 @@
-# miniOLAP — Feature Spec
+# tinyOLAP — Feature Spec
 
 ## Phase 1
 
 ### Storage
 
-1. **Abstractions**: `ColumnWriter`, `ColumnReader`, `MarkWriter`, `MarkReader` with LZ4 compression.
+1. **Abstractions**: `ColumnWriter`, `ColumnReader`, `TableWriter`, `TableReader` with LZ4 compression.
 2. **Data types**: integers (`i8`–`u64`), `f32`/`f64`, `bool`, variable-length strings.
 3. **Schema**: single table, frozen at startup. One column designated as the primary key (sort key).
-4. **Sorted parts**: each INSERT batch is written as an immutable "part" — a directory of per-column files, sorted by primary key.
-5. **Partitioning**: data partitioned by a single column (e.g. a date). Each partition is an independent directory of parts.
+4. Add other encoding schemes like Delta, RLE, Dictionary?.
 
-### Query Processing
+### Query Processing & Executor
 
 1. **WHERE**: predicates (`=`, `<`, `>`, `<=`, `>=`, `!=`, `AND`, `OR`, `NOT`) evaluated column-by-column.
 2. **Aggregations**: `SUM`, `AVG`, `COUNT`, `MIN`, `MAX`, quantiles — with `GROUP BY` and `HAVING`.
 3. **Parallelism**: `rayon` across granules and parts.
 4. **SIMD**: vectorized arithmetic and comparisons in the hot path via `std::simd`. Core learning goal — required.
+5. **Sorted Parts**: each INSERT batch is written as an immutable "part" — a directory of per-column files, sorted by primary key. Do we want to do this in-memory or spillover to disk is allowed?
 
 ### Query Parsing
 
@@ -32,6 +32,7 @@ SELECT x, y, agg(z) FROM defaulttable WHERE <cond> GROUP BY <cols> HAVING <cond>
 1. **Background merging**: merge multiple sorted parts into one larger sorted part while queries run.
 2. **External merge sort**: merge algorithm for parts that exceed memory.
 3. **Merge scheduler**: background thread that triggers merges on part count / size thresholds.
+4. **Partitioning**: data partitioned by a single column (e.g. a date). Each partition is an independent directory of parts.
 
 ---
 

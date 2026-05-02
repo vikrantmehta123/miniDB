@@ -122,7 +122,8 @@ impl StringColumnWriter {
         }
         self.flush_block()?;
 
-        let bin_bytes = self.data_file.metadata()?.len();
+        let bin_bytes = self.block_offset;
+        self.data_file.sync_all()?;
         self.mark_writer.flush()?;
 
         Ok(ColumnStats {

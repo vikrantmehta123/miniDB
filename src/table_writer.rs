@@ -80,6 +80,7 @@ impl TableWriter {
 
         // ---- 4. Atomic-ish finalize: rename tmp -> part_NNNNN. ----
         fs::rename(&tmp_dir, &final_dir)?;
+        fs::File::open(&self.table_dir)?.sync_all()?;
 
         Ok(PartMetadata {
             part_id,

@@ -47,6 +47,7 @@ impl MarkWriter {
 
     pub fn flush(&mut self) -> std::io::Result<()> {
         self.file.write_all(&self.buf)?;
+        self.file.sync_all()?;
         Ok(())
     }
 }
