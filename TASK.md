@@ -1,6 +1,20 @@
 # Current Tasks
 
-No active task. Encoding library (Plain, Delta, RLE) is complete in `src/encoding/`. Integration with column writers is the next concrete piece of work, but not started — pick it up when ready.
+## Active — SQL parser frontend (INSERT only)
+
+Wire up a minimal SQL parser so we can drive `TableWriter::insert` from a SQL string end-to-end. Uses `sqlparser-rs` for the actual parsing; we own a thin internal AST so the executor never touches sqlparser types.
+
+**Steps**
+1. Add `sqlparser` dep to `Cargo.toml`.
+2. `src/parser/ast.rs` — define `Statement`, `InsertStmt`, `Literal` enums.
+3. `src/parser/lower.rs` — match on `sqlparser::ast::Statement::Insert(...)`, walk `SetExpr::Values { rows, .. }`, lower each `Expr` to our `Literal`. Reject everything else with `ParseError::Unsupported`.
+4. `src/parser/mod.rs` — public `parse(sql: &str) -> Result<Statement, ParseError>`; calls sqlparser then `lower::lower`.
+5. `mod parser;` in `main.rs`; smoke-test with a batch INSERT string.
+6. Type-check + transpose `Vec<Vec<Literal>>` → `Vec<ColumnChunk>` against the schema. (Lives at the boundary between parser output and `TableWriter::insert`. Could go in `parser/` or a new `query/` module — decide when we get there.)
+
+**Out of scope for this task:** SELECT, WHERE, expressions in VALUES beyond literals + unary minus, multi-statement scripts.
+
+Encoding library (Plain, Delta, RLE) integration with column writers is still pending — pick up after the parser lands.
 
 ---
 
