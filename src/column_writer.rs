@@ -53,7 +53,7 @@ impl<T: IDataType> ColumnWriter<T> {
                 });
             }
 
-            self.block_buf.extend_from_slice(&v.to_le_bytes_vec());
+            v.extend_le_bytes(&mut self.block_buf);
             self.rows_in_current_granule += 1;
             self.total_rows += 1;
 

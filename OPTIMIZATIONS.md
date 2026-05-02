@@ -154,6 +154,8 @@ deeply.
 
 ### 2.1 `to_le_bytes_vec(&self) -> Vec<u8>` — per-value heap allocation
 
+#### The Problem
+
 Look at the trait:
 ```rust
 fn to_le_bytes_vec(&self) -> Vec<u8> {
@@ -161,54 +163,196 @@ fn to_le_bytes_vec(&self) -> Vec<u8> {
 }
 ```
 
-`to_le_bytes()` returns `[u8; 8]` for an `i64` — a stack array, free. Then
-`.to_vec()` allocates an 8-byte heap buffer, memcpys the array into it,
-returns a `Vec<u8>` that owns that heap allocation. The caller then does
-`extend_from_slice(&v.to_le_bytes_vec())` which copies *again* into
-`block_buf` and drops the temporary `Vec`, freeing the 8-byte allocation.
+Two steps unpacked:
 
-**Per `i64` value, today:**
-- 1 stack-to-heap copy (8 bytes)
-- 1 `malloc(8)` + 1 `free(8)`
-- 1 heap-to-buffer copy (8 bytes)
+1. `self.to_le_bytes()` returns `[u8; 8]` for an `i64` — a **stack** array.
+   Free: no allocator, just a stack-pointer bump.
+2. `.to_vec()` is the expensive part. `Vec<u8>` is heap-backed. `.to_vec()`
+   does:
+   - `malloc(8)` — ask the allocator for 8 bytes of heap.
+   - copy the 8 bytes from the stack array into the heap.
+   - return a `Vec<u8>` owning that heap allocation.
 
-**Cost at 100k rows:** 100k mallocs + 100k frees, plus two redundant 8-byte
-copies. `malloc` is ~10–50 ns on a good allocator, so you're burning
-1–5 ms of pure allocator overhead before any real work. On a column where
-the actual work (memcpy + LZ4) takes ~200 µs, allocator noise is dominating
-the column-write time.
+Then the caller does `extend_from_slice(&v.to_le_bytes_vec())`, which copies
+the 8 bytes *again* into `block_buf`. The temporary `Vec<u8>` falls out of
+scope and `free(8)` releases the heap allocation.
 
-**Fix — option A: write to a writer.** Change the trait:
+**Per `i64` value:** 1 `malloc`, 1 `free`, 2 byte-copies. For 8 bytes of
+data.
+
+**Cost at 100k rows:** ~100k mallocs + 100k frees. At ~10–50 ns each, that
+is ~3–6 ms of pure allocator overhead. The actual work (memcpy + LZ4 on
+~800 KB) takes ~200 µs. **Allocator bookkeeping is ~30× the cost of the
+real work.** That is the disease.
+
+---
+
+#### Fix A — the simple fix (recommended starting point)
+
+Change the trait to write into a buffer the caller already owns:
+
 ```rust
-fn write_le<W: Write>(&self, w: &mut W) -> io::Result<()>;
+pub trait IDataType: Sized + Copy {
+    fn name() -> &'static str;
+    fn extend_le_bytes(&self, out: &mut Vec<u8>);
+    fn from_le_bytes(bytes: &[u8]) -> Self;
+}
+
+impl IDataType for i64 {
+    fn name() -> &'static str { "Int64" }
+    fn extend_le_bytes(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.to_le_bytes());
+    }
+    fn from_le_bytes(bytes: &[u8]) -> Self {
+        Self::from_le_bytes(bytes.try_into().unwrap())
+    }
+}
 ```
-Each impl just calls `w.write_all(&self.to_le_bytes())`. Zero allocations.
 
-**Fix — option B: bulk memcpy via `bytemuck`.** The real insight: for a slice
-of `i64`s on a little-endian machine, `&[i64]` and `&[u8]` of length `8 *
-N` are byte-identical. `bytemuck::cast_slice(values): &[u8]` reinterprets
-the slice with no copy and no allocation. Then `block_buf.extend_from_slice
-(bytes)` is *one* memcpy for the whole chunk.
+`self.to_le_bytes()` is the same `[u8; 8]` stack array as before. We slice
+it (`&[u8; 8]` coerces to `&[u8]`) and `extend_from_slice` copies the 8
+bytes directly into `out`. **No `Vec<u8>` is created. No allocator is
+touched.**
 
-Worked example, 1024 `i64` values (one granule):
+Caller in the writer becomes:
+```rust
+v.extend_le_bytes(&mut self.block_buf);
+```
+
+Result for 100k rows: **0 mallocs, 0 frees.** This single change captures
+~90% of the §2 win, and the diff is tiny.
+
+---
+
+#### Fix B — bulk memcpy via `bytemuck` (deferred — implement later)
+
+Even after Fix A, the writer still loops over values one at a time:
+```rust
+for v in values {                  // 100k iterations
+    v.extend_le_bytes(&mut buf);   // 8-byte copy per iteration
+}
+```
+The CPU is doing 100,000 small copies. The compiler may auto-vectorize, but
+there's no guarantee. The deeper insight: `&[i64]` in RAM and "N
+little-endian i64s on disk" have the **identical byte layout** on a
+little-endian machine. The bytes are *already* arranged correctly. Why
+copy them in 8-byte chunks when one big memcpy would do?
+
+##### What `bytemuck` is
+
+A small crate (~1000 lines, no macros, no codegen) whose job is: **safely
+reinterpret a slice of one type as a slice of another, with compile-time
+checks that the cast can't cause UB.**
+
+```rust
+let values: &[i64] = &[1, 2, 3, 4];
+let bytes:  &[u8]  = bytemuck::cast_slice(values);
+// bytes.len() == 32, points at the same memory as `values`.
+// Zero copy. Zero allocation. Just a different view of the same bytes.
+```
+
+Then `out.extend_from_slice(bytes)` is **one** memcpy of the whole chunk —
+SIMD-optimized in the libc/stdlib implementation, runs near memory
+bandwidth.
+
+##### Why we need a library for this
+
+In Rust, reinterpreting types is normally `unsafe` because of UB hazards:
+
+- **Alignment.** Reading an `i64` from an unaligned pointer is UB on some
+  CPUs (and generates slow code on others). `&[u8]` has alignment 1; `&[i64]`
+  needs alignment 8. Casting bytes-to-typed needs an alignment check.
+- **Invalid bit patterns.** A `bool` must be `0x00` or `0x01`. A reference
+  must be non-null and aligned. A `char` must be a valid Unicode scalar.
+  Reinterpreting random bytes as any of these is UB.
+- **Padding.** A `struct { a: u8, b: u32 }` has 3 padding bytes whose
+  contents are uninitialized; exposing them is UB.
+
+`bytemuck` handles this with a marker trait, `Pod` ("Plain Old Data"),
+which encodes the contract: "every bit pattern is a valid value, no
+padding, no invariants." A type opts in by deriving or implementing `Pod`.
+All raw numeric types (`i8`–`u64`, `f32`, `f64`) impl `Pod`. **`bool` does
+not** (only 2 of 256 bit patterns are valid). References don't. Structs
+need explicit opt-in.
+
+By making types prove `Pod`, `bytemuck::cast_slice` is sound *and* safe —
+no `unsafe` block in your code.
+
+##### The bool wrinkle
+
+Because `bool: !Pod`, the bytemuck path doesn't apply to bool columns. Two
+ways to handle it:
+- Keep a manual loop for bool: `out.extend(values.iter().map(|&b| b as u8))`.
+  Allocation-free, just not a single memcpy. Fine — bool columns are rare
+  and small.
+- Eventually switch bool to a bit-packed representation (8× compression for
+  free, see §5.2). Then bool's "encode" is bit-packing, not a memcpy
+  anyway, so the question dissolves.
+
+##### The endianness assumption
+
+`bytemuck::cast_slice(&[i64]) -> &[u8]` reinterprets memory in **native**
+byte order. tinyOLAP runs on x86_64 (LE), and the on-disk format is LE, so
+they coincide. On a hypothetical big-endian target, the cast would silently
+produce wrong-endian bytes. Pin this with a compile-time check at the top
+of `data_type.rs`:
+```rust
+#[cfg(not(target_endian = "little"))]
+compile_error!("tinyOLAP assumes a little-endian target");
+```
+
+##### The reader-side alignment caveat
+
+Going `&[u8] → &[i64]` is harder than the write direction. The decompressed
+block is a `Vec<u8>`; a sub-slice `&block[start..end]` is only `i64`-aligned
+if `start` happens to be a multiple of 8. `bytemuck::cast_slice` checks
+alignment at runtime and **panics** on mismatch.
+
+Two paths:
+- **`chunks_exact(8)` + `from_le_bytes` loop.** No alignment issue, no
+  unsafe. Allocation-free into a pre-reserved `Vec<T>`. The compiler usually
+  auto-vectorizes the loop. Simpler; recommended.
+- **Pre-resize a `Vec<T>` then memcpy bytes into it.** The destination is
+  `T`-aligned by construction (Vec's allocation is always `T`-aligned).
+  Costs one memset (zero-fill) plus one memcpy. Truly bulk.
+
+##### Worked comparison
+
+| Approach | mallocs/100k rows | copies | Complexity |
+|---|---|---|---|
+| Today (`to_le_bytes_vec`) | 100,000 | 200,000 small | trivial |
+| Fix A (`extend_le_bytes` per value) | 0 | 100,000 small | trivial |
+| Fix B (bytemuck bulk memcpy) | 0 | 1 big memcpy | adds dep, more concepts |
+
+For 1024 `i64` values (one granule):
 ```text
-Today:                     Bulk:
-  1024 mallocs               0 mallocs
-  1024 frees                 0 frees
-  1024 × 8B copy (to Vec)    0
-  1024 × 8B copy (extend)    1 × 8192B memcpy   ← one memcpy
-  ────────────────           ─────────────
-  ~30 µs allocator           ~1 µs total
+Today:                     Fix A:                      Fix B:
+  1024 mallocs               0 mallocs                   0 mallocs
+  1024 frees                 0 frees                     0 frees
+  1024 × 8B copy (to Vec)    0                           0
+  1024 × 8B copy (extend)    1024 × 8B copy              1 × 8192B memcpy
+  ─────────────────          ──────────────              ────────────────
+  ~30 µs allocator           ~5–10 µs                    ~1 µs
   + 30 µs of copies
 ```
-That's ~50× faster for the per-granule write path. Multiply by columns and
-granules and you're talking real wall-clock.
 
-The catch: `bytemuck::cast_slice` requires `T: Pod`. All your numeric types
-are. `bool` is not (Rust treats `bool` as a 1-byte type whose only valid
-bit-patterns are 0 and 1, so casting `&[bool]` to `&[u8]` *is* sound but
-needs `bytemuck::cast_slice` not to balk — actually `bool` doesn't impl
-`Pod` so you'd handle it specially or use a bit-packed bool path).
+##### When to come back for Fix B
+
+After Fix A is in and verified, Fix B is worth it when:
+- Profiling shows `extend_from_slice` or the per-value loop dominating.
+- A bulk reader API is being added (the reader-side memcpy path matters
+  more once aggregations are in the picture).
+- You want a slice-shaped trait anyway (e.g., for SIMD encoding kernels).
+
+Fix B's diff also requires reshaping the trait to operate on `&[Self]` (so
+each impl can choose bulk vs. per-element internally), and chunking input
+in `write_chunk` along granule boundaries. Not hard, but more moving parts
+than Fix A.
+
+---
+
+**Plan of record:** apply Fix A now. Defer Fix B until profiling justifies
+it or until a bulk reader API forces the trait reshape.
 
 ### 2.2 `from_le_bytes` per element on read — same disease
 
