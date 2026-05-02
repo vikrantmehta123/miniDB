@@ -4,7 +4,7 @@
 //! Each delta is `value[i].wrapping_sub(value[i-1])`. Wrapping arithmetic
 //! makes the round-trip correct even when subtraction would overflow.
 
-use crate::encoding::Primitive;
+use crate::encoding::{Primitive, EncodingError};
 
 pub fn encode<T: Primitive>(src: &[T], out: &mut Vec<u8>) {
     if src.is_empty() {
@@ -20,10 +20,13 @@ pub fn encode<T: Primitive>(src: &[T], out: &mut Vec<u8>) {
         prev = v;
     }
 }
-
-pub fn decode<T: Primitive>(src: &[u8], out: &mut Vec<T>) {
+pub fn decode<T: Primitive>(src: &[u8], out: &mut Vec<T>) -> Result<(), EncodingError> {
     if src.is_empty() {
-        return;
+        return Ok(());
+    }
+
+    if src.len() % T::WIDTH != 0 {
+        return Err(EncodingError::Truncated);
     }
 
     let mut chunks = src.chunks_exact(T::WIDTH);
@@ -38,6 +41,8 @@ pub fn decode<T: Primitive>(src: &[u8], out: &mut Vec<T>) {
         out.push(v);
         prev = v;
     }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -50,7 +55,7 @@ mod tests {
         let mut bytes = Vec::new();
         encode(&xs, &mut bytes);
         let mut out: Vec<i32> = Vec::new();
-        decode(&bytes, &mut out);
+        decode(&bytes, &mut out).unwrap();
         assert_eq!(xs, out);
     }
 
@@ -61,7 +66,7 @@ mod tests {
         encode(&xs, &mut bytes);
         assert!(bytes.is_empty());
         let mut out: Vec<i32> = Vec::new();
-        decode(&bytes, &mut out);
+        decode(&bytes, &mut out).unwrap();
         assert_eq!(xs, out);
     }
 
@@ -72,7 +77,7 @@ mod tests {
         encode(&xs, &mut bytes);
         assert_eq!(bytes.len(), 4); // just the first value, no delta yet
         let mut out: Vec<i32> = Vec::new();
-        decode(&bytes, &mut out);
+        decode(&bytes, &mut out).unwrap();
         assert_eq!(xs, out);
     }
 
@@ -84,7 +89,7 @@ mod tests {
         let mut bytes = Vec::new();
         encode(&xs, &mut bytes);
         let mut out: Vec<i32> = Vec::new();
-        decode(&bytes, &mut out);
+        decode(&bytes, &mut out).unwrap();
         assert_eq!(xs, out);
     }
 
@@ -94,7 +99,7 @@ mod tests {
         let mut bytes = Vec::new();
         encode(&xs, &mut bytes);
         let mut out: Vec<i64> = Vec::new();
-        decode(&bytes, &mut out);
+        decode(&bytes, &mut out).unwrap();
         assert_eq!(xs, out);
     }
 
@@ -104,7 +109,7 @@ mod tests {
         let mut bytes = Vec::new();
         encode(&xs, &mut bytes);
         let mut out: Vec<u32> = Vec::new();
-        decode(&bytes, &mut out);
+        decode(&bytes, &mut out).unwrap();
         assert_eq!(xs, out);
     }
 
