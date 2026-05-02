@@ -1,3 +1,4 @@
+mod encoding;
 mod column_reader;
 mod column_writer;
 mod column_chunk;

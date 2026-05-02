@@ -6,8 +6,11 @@
 
 ## Core Design Decisions
 - **Columnar storage**: data stored column-by-column, not row-by-row
-- **Chunk size**: 1024 values per chunk (the atomic unit of processing)
+- **Granule size**: `GRANULE_SIZE = 512` values (the atomic addressable unit — one mark per granule). Configured in `src/config.rs`.
+- **Block buffer**: `BLOCK_BUFFER_SIZE = 8 KiB` of uncompressed bytes per compressed block (multiple granules may share a block; one block = one lz4 compress call).
 - **Supported types**: all numeric types (`i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `f32`, `f64`), `bool`, variable-length strings
+- **Insert API is column-oriented**: `TableWriter::insert(Vec<ColumnChunk>)` — the caller transposes rows into columns. `ColumnChunk` is an enum with one variant per supported type.
+- **One INSERT = one part**: parts are immutable directories `part_NNNNN/` containing per-column `<col>.bin` (compressed data) and `<col>.mrk` (granule index). Writes go to `tmp_part_NNNNN/` and are atomically renamed on success.
 - **Disk-persistent**: data lives on disk, not in memory — no in-memory-only database
 - **No custom parser**: use an off-the-shelf SQL parser crate
 - **Features evolve as we write code** — don't over-plan
