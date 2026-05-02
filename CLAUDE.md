@@ -2,7 +2,7 @@
 
 ## Project Goals
 1. **Learn Rust by doing** — concurrency, ownership, safety, traits, async
-2. **Build a columnar database from scratch** — understand how real column stores work
+2. **Build a columnar database from scratch** — understand how real column stores work. We more or less try to look at ClickHouse for inspiration. The source code for ClickHouse can be found at /Personal/open-source/ClickHouse.
 
 ## Core Design Decisions
 - **Columnar storage**: data stored column-by-column, not row-by-row

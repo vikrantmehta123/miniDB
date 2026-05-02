@@ -11,6 +11,7 @@ mod string_column_writer;
 mod table_reader;
 mod table_writer;
 mod parser;
+mod aggregator;
 
 use std::path::PathBuf;
 
