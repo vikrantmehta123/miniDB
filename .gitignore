@@ -2,3 +2,4 @@
 *.mrk
 *.bin
 /data
+/tasks

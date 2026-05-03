@@ -23,9 +23,10 @@
 - Introduce concurrency (e.g., `rayon`, channels, `Arc<Mutex<>>`) when it fits naturally
 - Keep it simple — no premature abstractions
 
-## Current Task
-- Active work is tracked in `TASK.md` at the repo root. Always read it at the start of a session to know what we're building next and which step we're on.
-- `TASK.md` contains only what is actively being worked on — completed steps are removed. It is not a history log.
+## Task Management
+- Tasks live in the `tasks/` directory at the repo root. Each task is a separate markdown file named `TASK-<ID>.md` (e.g., `TASK-001.md`).
+- Each task file contains: **ID**, **Title**, **Description**, and the active steps being worked on. Completed steps are removed — task files are not history logs.
+- At the start of a session, ask the user which task they want to work on (or read the directory if context makes it obvious).
 - Feature scope and phasing is in `SPEC.md` at the repo root. Read it for context on what Phase 1 covers and what is deferred to Phase 2.
 
 ## Build System
