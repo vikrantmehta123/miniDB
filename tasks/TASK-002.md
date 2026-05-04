@@ -31,8 +31,8 @@ Wire up `criterion` and establish baseline throughput numbers for the write and 
 
 | Benchmark | Throughput | Notes |
 |---|---|---|
-| write 1M i64 | — | |
-| scan 1M i64 | — | |
+| write 1M i64 | ~705 MiB/s | Delta + LZ4 + fsync, ~10.8 ms/iter |
+| scan 1M i64 | ~443 MiB/s | LZ4 decompress + delta decode, ~17.2 ms/iter |
 
 ---
 

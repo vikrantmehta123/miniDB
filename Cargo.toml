@@ -11,3 +11,15 @@ serde_json = "1"
 sqlparser = "0.61.0"
 ahash = "0.8.12"
 rand = "0.10.1"
+
+[dev-dependencies]
+criterion = { version = "0.8.2", features = ["html_reports"] }
+tempfile = "3.27.0"
+
+[[bench]]
+name = "throughput"
+harness = false
+
+[lib]
+name = "tinyolap"
+path = "src/lib.rs"
