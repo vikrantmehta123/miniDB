@@ -5,12 +5,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use rayon::prelude::*;
 
-use crate::column_chunk::ColumnChunk;
-use crate::column_writer::{write_column, ColumnStats};
-use crate::encoding::{Codec, StringCodec};
-use crate::schema::{ColumnDef, DataType, TableDef};
-use crate::string_column_writer::write_string_column;
+use crate::storage::column_chunk::ColumnChunk;
+use crate::storage::column_writer::{write_column, ColumnStats};
+use crate::storage::schema::{ColumnDef, DataType, TableDef};
+use crate::storage::string_column_writer::write_string_column;
 
+use crate::encoding::{Codec, StringCodec};
 pub struct PartMetadata {
     pub part_id: u32,
     pub rows: u64,

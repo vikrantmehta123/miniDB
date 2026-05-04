@@ -2,12 +2,15 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
-use crate::mark::{Mark, MarkReader};
+use crate::encoding::StringCodec;
+use crate::storage::mark::{Mark, MarkReader};
 
 pub struct StringColumnReader {
     bin: File,
     marks: Vec<Mark>,
-    cache: Option<(u64, Vec<u8>)>,
+    /// Single-block cache keyed by block_offset. Stores decoded strings so
+    /// read_granule can slice by index directly — no byte math, no re-encode.
+    cache: Option<(u64, Vec<String>)>,
 }
 
 impl StringColumnReader {
@@ -28,10 +31,15 @@ impl StringColumnReader {
     pub fn read_granule(&mut self, idx: usize) -> io::Result<Vec<String>> {
         let mark = &self.marks[idx];
 
-        // Ensure the right block is cached.
         let cache_hit = matches!(&self.cache, Some((off, _)) if *off == mark.block_offset);
         if !cache_hit {
             self.bin.seek(SeekFrom::Start(mark.block_offset))?;
+
+            // Framing: [u8 codec_tag][u32 LE compressed_len][compressed bytes]
+            let mut tag = [0u8; 1];
+            self.bin.read_exact(&mut tag)?;
+            let codec = StringCodec::from_tag(tag[0])
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")))?;
 
             let mut len_buf = [0u8; 4];
             self.bin.read_exact(&mut len_buf)?;
@@ -40,42 +48,28 @@ impl StringColumnReader {
             let mut compressed = vec![0u8; compressed_len];
             self.bin.read_exact(&mut compressed)?;
 
-            let bytes = lz4_flex::decompress_size_prepended(&compressed)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let decompressed = lz4_flex::decompress_size_prepended(&compressed)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
-            self.cache = Some((mark.block_offset, bytes));
+            let mut strings: Vec<String> = Vec::new();
+            codec.decode(&decompressed, &mut strings)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")))?;
+
+            self.cache = Some((mark.block_offset, strings));
         }
 
-        let block = &self.cache.as_ref().unwrap().1;
+        let strings = &self.cache.as_ref().unwrap().1;
 
-        // Granule's byte range inside the decompressed block:
-        //   end = next mark's offset if same block, else end of block.
+        // decompressed_offset is a string count — slice directly by index.
         let start = mark.decompressed_offset as usize;
         let end = match self.marks.get(idx + 1) {
             Some(next) if next.block_offset == mark.block_offset => {
                 next.decompressed_offset as usize
             }
-            _ => block.len(),
+            _ => strings.len(),
         };
 
-        let mut out = Vec::new();
-        let mut cursor = start;
-        while cursor < end {
-            let len = i32::from_le_bytes(
-                block[cursor..cursor + 4]
-                    .try_into()
-                    .expect("4-byte slice"),
-            ) as usize;
-            cursor += 4;
-
-            let s = std::str::from_utf8(&block[cursor..cursor + len])
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-                .to_owned();
-            cursor += len;
-
-            out.push(s);
-        }
-        Ok(out)
+        Ok(strings[start..end].to_vec())
     }
 
     pub fn read_all(&mut self) -> io::Result<Vec<String>> {

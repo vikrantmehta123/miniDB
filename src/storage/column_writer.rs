@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::config::{BLOCK_BUFFER_SIZE, GRANULE_SIZE};
 use crate::encoding::{Codec, Primitive};
-use crate::mark::{Mark, MarkWriter};
+use crate::storage::mark::{Mark, MarkWriter};
 
 pub struct ColumnStats {
     pub rows: u64,

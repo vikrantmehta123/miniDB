@@ -2,13 +2,14 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
-use crate::data_type::IDataType;
-use crate::mark::{Mark, MarkReader};
+use crate::encoding::{Codec, Primitive};
+use crate::storage::mark::{Mark, MarkReader};
 
 pub struct ColumnReader {
     bin: File,
     marks: Vec<Mark>,
-    /// (block_offset, decompressed bytes) — single-block cache.
+    /// Single-block cache keyed by block_offset. Stores post-codec-decode bytes
+    /// so `read_granule` can slice straight into plain LE values.
     cache: Option<(u64, Vec<u8>)>,
 }
 
@@ -27,13 +28,18 @@ impl ColumnReader {
         self.marks.len()
     }
 
-    pub fn read_granule<T: IDataType>(&mut self, idx: usize) -> io::Result<Vec<T>> {
+    pub fn read_granule<T: Primitive>(&mut self, idx: usize) -> io::Result<Vec<T>> {
         let mark = &self.marks[idx];
 
-        // Make sure the right block is in the cache.
         let cache_hit = matches!(&self.cache, Some((off, _)) if *off == mark.block_offset);
         if !cache_hit {
             self.bin.seek(SeekFrom::Start(mark.block_offset))?;
+
+            // New framing: [u8 codec_tag][u32 LE compressed_len][compressed bytes]
+            let mut tag = [0u8; 1];
+            self.bin.read_exact(&mut tag)?;
+            let codec = Codec::from_tag(tag[0])
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")))?;
 
             let mut len_buf = [0u8; 4];
             self.bin.read_exact(&mut len_buf)?;
@@ -42,17 +48,24 @@ impl ColumnReader {
             let mut compressed = vec![0u8; compressed_len];
             self.bin.read_exact(&mut compressed)?;
 
-            let bytes = lz4_flex::decompress_size_prepended(&compressed)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let decompressed = lz4_flex::decompress_size_prepended(&compressed)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
-            self.cache = Some((mark.block_offset, bytes));
+            // Decode with the codec that was used at write time. After this step,
+            // `decoded` contains plain LE bytes — identical to what Plain would produce.
+            // The granule slicing below works the same regardless of which codec was used.
+            let mut decoded = Vec::new();
+            codec.decode(&decompressed, T::WIDTH, &mut decoded)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")))?;
+
+            self.cache = Some((mark.block_offset, decoded));
         }
 
         let block = &self.cache.as_ref().unwrap().1;
 
-        // Granule's byte range inside the decompressed block:
+        // Granule byte range inside the decoded block:
         //   start = this mark's decompressed_offset
-        //   end   = next mark's decompressed_offset, if it's in the *same* block;
+        //   end   = next mark's decompressed_offset if it's in the same block,
         //           otherwise the block ends here.
         let start = mark.decompressed_offset as usize;
         let end = match self.marks.get(idx + 1) {
@@ -62,25 +75,18 @@ impl ColumnReader {
             _ => block.len(),
         };
 
-        let elem_size = std::mem::size_of::<T>();
         debug_assert!(
-            (end - start) % elem_size == 0,
-            "granule byte range not a multiple of element size"
+            (end - start) % T::WIDTH == 0,
+            "granule byte range not a multiple of element width"
         );
-        let count = (end - start) / elem_size;
 
-        let mut out = Vec::with_capacity(count);
-        let mut cursor = start;
-        for _ in 0..count {
-            let v = T::from_le_bytes(&block[cursor..cursor + elem_size]);
-            out.push(v);
-            cursor += elem_size;
-        }
-        Ok(out)
+        Ok(block[start..end]
+            .chunks_exact(T::WIDTH)
+            .map(T::decode_le)
+            .collect())
     }
 
-    /// Convenience: read every granule in order.
-    pub fn read_all<T: IDataType>(&mut self) -> io::Result<Vec<T>> {
+    pub fn read_all<T: Primitive>(&mut self) -> io::Result<Vec<T>> {
         let mut out = Vec::new();
         for i in 0..self.marks.len() {
             out.extend(self.read_granule::<T>(i)?);

@@ -1,10 +1,10 @@
 use std::io;
 use std::path::Path;
 
-use crate::column_reader::ColumnReader;
-use crate::schema::{DataType, TableDef};
-use crate::column_chunk::{ColumnChunk};
-use crate::string_column_reader::StringColumnReader;
+use crate::storage::column_reader::ColumnReader;
+use crate::storage::schema::{DataType, TableDef};
+use crate::storage::column_chunk::{ColumnChunk};
+use crate::storage::string_column_reader::StringColumnReader;
 
 enum AnyReader {
     Numeric(ColumnReader),

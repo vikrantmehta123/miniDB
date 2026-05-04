@@ -1,4 +1,4 @@
-use crate::schema::DataType;
+use crate::storage::schema::DataType;
 
 #[derive(Debug)]
 pub enum ColumnChunk {
