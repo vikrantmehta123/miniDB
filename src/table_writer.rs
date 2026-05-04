@@ -5,11 +5,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use rayon::prelude::*;
 
-use crate::column_chunk::{ColumnChunk};
-use crate::column_writer::{ColumnStats, ColumnWriter};
-use crate::data_type::IDataType;
+use crate::column_chunk::ColumnChunk;
+use crate::column_writer::{write_column, ColumnStats};
+use crate::encoding::{Codec, StringCodec};
 use crate::schema::{ColumnDef, DataType, TableDef};
-use crate::string_column_writer::StringColumnWriter;
+use crate::string_column_writer::write_string_column;
 
 pub struct PartMetadata {
     pub part_id: u32,
@@ -123,35 +123,30 @@ fn write_one_column(
     col: &ColumnDef,
     chunk: &ColumnChunk,
 ) -> io::Result<ColumnStats> {
+    let codec = codec_for(col);
     match chunk {
-        ColumnChunk::I8(v)   => write_numeric::<i8>(part_dir, &col.name, v),
-        ColumnChunk::I16(v)  => write_numeric::<i16>(part_dir, &col.name, v),
-        ColumnChunk::I32(v)  => write_numeric::<i32>(part_dir, &col.name, v),
-        ColumnChunk::I64(v)  => write_numeric::<i64>(part_dir, &col.name, v),
-        ColumnChunk::U8(v)   => write_numeric::<u8>(part_dir, &col.name, v),
-        ColumnChunk::U16(v)  => write_numeric::<u16>(part_dir, &col.name, v),
-        ColumnChunk::U32(v)  => write_numeric::<u32>(part_dir, &col.name, v),
-        ColumnChunk::U64(v)  => write_numeric::<u64>(part_dir, &col.name, v),
-        ColumnChunk::F32(v)  => write_numeric::<f32>(part_dir, &col.name, v),
-        ColumnChunk::F64(v)  => write_numeric::<f64>(part_dir, &col.name, v),
-        ColumnChunk::Bool(v) => write_numeric::<bool>(part_dir, &col.name, v),
-        ColumnChunk::Str(v) => {
-            let mut w = StringColumnWriter::create(part_dir, &col.name)?;
-            w.write_chunk(v)?;
-            w.finish()
-        }
+        ColumnChunk::I8(v)   => write_column::<i8>(part_dir, &col.name, v, codec),
+        ColumnChunk::I16(v)  => write_column::<i16>(part_dir, &col.name, v, codec),
+        ColumnChunk::I32(v)  => write_column::<i32>(part_dir, &col.name, v, codec),
+        ColumnChunk::I64(v)  => write_column::<i64>(part_dir, &col.name, v, codec),
+        ColumnChunk::U8(v)   => write_column::<u8>(part_dir, &col.name, v, codec),
+        ColumnChunk::U16(v)  => write_column::<u16>(part_dir, &col.name, v, codec),
+        ColumnChunk::U32(v)  => write_column::<u32>(part_dir, &col.name, v, codec),
+        ColumnChunk::U64(v)  => write_column::<u64>(part_dir, &col.name, v, codec),
+        ColumnChunk::F32(v)  => write_column::<f32>(part_dir, &col.name, v, codec),
+        ColumnChunk::F64(v)  => write_column::<f64>(part_dir, &col.name, v, codec),
+        ColumnChunk::Bool(v) => write_column::<bool>(part_dir, &col.name, v, codec),
+        ColumnChunk::Str(v)  => write_string_column(part_dir, &col.name, v, StringCodec::Plain),
     }
 }
 
-fn write_numeric<T: IDataType>(
-    part_dir: &Path,
-    col_name: &str,
-    values: &[T],
-) -> io::Result<ColumnStats> {
-    let mut w = ColumnWriter::<T>::create(part_dir, col_name)?;
-    w.write_chunk(values)?;
-    w.finish()
+/// Codec selection lives here so column_writer stays type-blind.
+/// Today: Plain for everything. Future: read from ColumnDef once the schema
+/// carries codec metadata (e.g. Delta for timestamp columns).
+fn codec_for(_col: &ColumnDef) -> Codec {
+    Codec::Plain
 }
+
 
 fn scan_next_part_id(table_dir: &Path) -> io::Result<u32> {
     let mut max_id: i64 = -1;

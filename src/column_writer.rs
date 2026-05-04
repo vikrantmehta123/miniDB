@@ -1,10 +1,9 @@
 use std::fs::File;
-use std::io::{self, BufWriter, Seek, Write};
-use std::marker::PhantomData;
+use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
 use crate::config::{BLOCK_BUFFER_SIZE, GRANULE_SIZE};
-use crate::data_type::IDataType;
+use crate::encoding::{Codec, Primitive};
 use crate::mark::{Mark, MarkWriter};
 
 pub struct ColumnStats {
@@ -12,95 +11,135 @@ pub struct ColumnStats {
     pub bin_bytes: u64,
 }
 
-pub struct ColumnWriter<T: IDataType> {
-    bin: BufWriter<File>,
-    marks: MarkWriter,
+/// Write one non-string column to disk for a single part.
+///
+/// Pipeline per block:
+///   Vec<T>  --serialize-->  raw bytes  --codec.encode-->  encoded bytes  --lz4-->  disk
+///
+/// One mark per granule, buffered until the block lands on disk so we can
+/// stamp it with the real block_offset. fsync is called once at the end —
+/// durability boundary is one INSERT = one part.
+pub fn write_column<T: Primitive>(
+    part_dir: &Path,
+    col_name: &str,
+    values: &[T],
+    codec: Codec,
+) -> io::Result<ColumnStats> {
+    let bin_path = part_dir.join(format!("{col_name}.bin"));
+    let mrk_path = part_dir.join(format!("{col_name}.mrk"));
 
-    block_buf: Vec<u8>,
-    pending_marks: Vec<Mark>,
+    let mut bin = BufWriter::new(File::create(bin_path)?);
+    let mut marks = MarkWriter::create(&mrk_path)?;
 
-    rows_in_current_granule: usize,
-    total_rows: u64,
+    // Typed staging buffer so the codec sees a full block at once.
+    // Delta and RLE need neighbouring values — encoding byte-by-byte breaks them.
+    let cap = (BLOCK_BUFFER_SIZE / T::WIDTH).max(GRANULE_SIZE);
+    let mut block_values: Vec<T> = Vec::with_capacity(cap);
+    let mut pending_marks: Vec<Mark> = Vec::new();
 
-    _phantom: PhantomData<T>,
+    let mut rows_in_current_granule: usize = 0;
+    let mut rows_in_current_block: usize = 0;
+    let mut total_rows: u64 = 0;
+    let mut bin_bytes: u64 = 0;
+
+    for &v in values {
+        // First row of a granule: push a mark before appending the value.
+        // decompressed_offset is a byte offset into the decoded value stream,
+        // which is fixed-width T, so it's simply rows_in_block * T::WIDTH.
+        if rows_in_current_granule == 0 {
+            pending_marks.push(Mark {
+                block_offset: 0, // patched in flush_block once we know the offset
+                decompressed_offset: (rows_in_current_block * T::WIDTH) as u64,
+            });
+        }
+
+        block_values.push(v);
+        rows_in_current_granule += 1;
+        rows_in_current_block += 1;
+        total_rows += 1;
+
+        // Granules are atomic — only consider flushing on a boundary, never mid-granule.
+        if rows_in_current_granule == GRANULE_SIZE {
+            rows_in_current_granule = 0;
+            if block_values.len() * T::WIDTH >= BLOCK_BUFFER_SIZE {
+                flush_block(
+                    codec,
+                    &mut block_values,
+                    &mut pending_marks,
+                    &mut bin,
+                    &mut marks,
+                    &mut bin_bytes,
+                    &mut rows_in_current_block,
+                )?;
+            }
+        }
+    }
+
+    // Flush the tail block — may be a partial granule, its mark was already pushed.
+    flush_block(
+        codec,
+        &mut block_values,
+        &mut pending_marks,
+        &mut bin,
+        &mut marks,
+        &mut bin_bytes,
+        &mut rows_in_current_block,
+    )?;
+
+    // fsync once for the whole INSERT. MarkWriter::flush calls sync_all internally.
+    bin.flush()?;
+    bin.get_ref().sync_all()?;
+    marks.flush()?;
+
+    Ok(ColumnStats {
+        rows: total_rows,
+        bin_bytes,
+    })
 }
 
-impl<T: IDataType> ColumnWriter<T> {
-    pub fn create(part_dir: &Path, col_name: &str) -> io::Result<Self> {
-        let bin_path = part_dir.join(format!("{col_name}.bin"));
-        let mrk_path = part_dir.join(format!("{col_name}.mrk"));
-
-        let bin = BufWriter::new(File::create(bin_path)?);
-        let marks = MarkWriter::create(&mrk_path)?;
-
-        Ok(Self {
-            bin,
-            marks,
-            block_buf: Vec::with_capacity(BLOCK_BUFFER_SIZE * 2),
-            pending_marks: Vec::new(),
-            rows_in_current_granule: 0,
-            total_rows: 0,
-            _phantom: PhantomData,
-        })
+/// Serialize, encode, compress and write the current block. Patches pending
+/// marks with the real on-disk block_offset. No-op on empty buffer.
+fn flush_block<T: Primitive>(
+    codec: Codec,
+    block_values: &mut Vec<T>,
+    pending_marks: &mut Vec<Mark>,
+    bin: &mut BufWriter<File>,
+    marks: &mut MarkWriter,
+    bin_bytes: &mut u64,
+    rows_in_current_block: &mut usize,
+) -> io::Result<()> {
+    if block_values.is_empty() {
+        return Ok(());
     }
 
-    pub fn write_chunk(&mut self, values: &[T]) -> io::Result<()> {
-        for v in values {
-            if self.rows_in_current_granule == 0 {
-                self.pending_marks.push(Mark {
-                    block_offset: 0, // placeholder — patched at flush
-                    decompressed_offset: self.block_buf.len() as u64,
-                });
-            }
-
-            v.extend_le_bytes(&mut self.block_buf);
-            self.rows_in_current_granule += 1;
-            self.total_rows += 1;
-
-            if self.rows_in_current_granule == GRANULE_SIZE {
-                self.rows_in_current_granule = 0;
-                if self.block_buf.len() >= BLOCK_BUFFER_SIZE {
-                    self.flush_block()?;
-                }
-            }
-        }
-        Ok(())
+    // Phase 1: typed values → raw LE bytes.
+    let mut raw: Vec<u8> = Vec::with_capacity(block_values.len() * T::WIDTH);
+    for v in block_values.iter() {
+        v.encode_le(&mut raw);
     }
 
-    fn flush_block(&mut self) -> io::Result<()> {
-        if self.block_buf.is_empty() {
-            return Ok(());
-        }
+    // Phase 2: codec transforms bytes → bytes (type-blind, knows only stride).
+    let mut encoded: Vec<u8> = Vec::new();
+    codec.encode(&raw, T::WIDTH, &mut encoded);
 
-        let block_offset = self.bin.stream_position()?;
-        let compressed = lz4_flex::compress_prepend_size(&self.block_buf);
-        self.bin
-            .write_all(&(compressed.len() as u32).to_le_bytes())?;
-        self.bin.write_all(&compressed)?;
+    // Phase 3: lz4 compress and write.
+    // Block framing: [u8 codec_tag][u32 LE compressed_len][compressed bytes]
+    // The codec tag lets the reader choose the right decode path after decompression.
+    let compressed = lz4_flex::compress_prepend_size(&encoded);
+    let block_offset = *bin_bytes;
 
-        for mut mark in self.pending_marks.drain(..) {
-            mark.block_offset = block_offset;
-            self.marks.write(&mark);
-        }
+    bin.write_all(&[codec.tag()])?;
+    bin.write_all(&(compressed.len() as u32).to_le_bytes())?;
+    bin.write_all(&compressed)?;
+    *bin_bytes += 1 + 4 + compressed.len() as u64;
 
-        self.block_buf.clear();
-        Ok(())
+    // Now that block_offset is known, patch and queue all pending marks.
+    for mut mark in pending_marks.drain(..) {
+        mark.block_offset = block_offset;
+        marks.write(&mark);
     }
 
-    pub fn finish(mut self) -> io::Result<ColumnStats> {
-        if self.rows_in_current_granule > 0 {
-            self.rows_in_current_granule = 0;
-        }
-        self.flush_block()?;
-
-        self.bin.flush()?;
-        let bin_bytes: u64 = self.bin.stream_position()?;
-        self.bin.get_ref().sync_all()?;
-        self.marks.flush()?;
-
-        Ok(ColumnStats {
-            rows: self.total_rows,
-            bin_bytes,
-        })
-    }
+    block_values.clear();
+    *rows_in_current_block = 0;
+    Ok(())
 }

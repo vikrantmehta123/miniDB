@@ -12,6 +12,11 @@
 //! They will have their own encoding abstraction in a future `string_encoding` module.
 
 pub mod plain;
+pub mod delta;
+pub mod rle;
+pub mod string_dictionary;
+pub mod string_plain;
+
 
 mod sealed {
     pub trait Sealed {}
@@ -129,6 +134,8 @@ impl Primitive for bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Codec {
     Plain,
+    Delta,
+    RLE,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +146,9 @@ pub enum EncodingError {
     BadHeader,
     /// This codec does not support the given stride (value width in bytes).
     UnsupportedStride(usize),
+
+    InvalidUtf8,   // string bytes on disk are not valid UTF-8
+    Corrupt,       // structural corruption (e.g. dictionary index out of bounds)
 }
 
 impl Codec {
@@ -150,6 +160,8 @@ impl Codec {
     pub fn encode(&self, src: &[u8], stride: usize, out: &mut Vec<u8>) {
         match self {
             Codec::Plain => plain::encode(src, stride, out),
+            Codec::Delta => delta::encode(src, stride, out),
+            Codec::RLE => rle::encode(src, stride, out),
         }
     }
 
@@ -165,6 +177,8 @@ impl Codec {
     ) -> Result<(), EncodingError> {
         match self {
             Codec::Plain => plain::decode(src, stride, out),
+            Codec::Delta => delta::decode(src, stride, out),
+            Codec::RLE => rle::decode(src, stride, out),
         }
     }
 
@@ -172,12 +186,57 @@ impl Codec {
     pub fn tag(self) -> u8 {
         match self {
             Codec::Plain => 0,
+            Codec::Delta => 1,
+            Codec::RLE => 2,
         }
     }
 
     pub fn from_tag(tag: u8) -> Result<Self, EncodingError> {
         match tag {
             0 => Ok(Codec::Plain),
+            1 => Ok(Codec::Delta),
+            2 => Ok(Codec::RLE),
+            _ => Err(EncodingError::BadHeader),
+        }
+    }
+}
+
+
+/// Which encoding was applied to a string column's byte stream.
+/// Stored as a single tag byte at the start of each compressed block,
+/// parallel to `Codec` for numeric columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringCodec {
+    Plain,
+    Dictionary,
+}
+
+impl StringCodec {
+    pub fn encode(&self, src: &[String], out: &mut Vec<u8>) {
+        match self {
+            StringCodec::Plain      => string_plain::encode(src, out),
+            StringCodec::Dictionary => string_dictionary::encode(src, out),
+        }
+    }
+
+    pub fn decode(&self, src: &[u8], out: &mut Vec<String>) -> Result<(), EncodingError> {
+        match self {
+            StringCodec::Plain      => string_plain::decode(src, out),
+            StringCodec::Dictionary => string_dictionary::decode(src, out),
+        }
+    }
+
+    pub fn tag(self) -> u8 {
+        match self {
+            StringCodec::Plain      => 0,
+            StringCodec::Dictionary => 1,
+        }
+    }
+
+    pub fn from_tag(tag: u8) -> Result<Self, EncodingError> {
+        match tag {
+            0 => Ok(StringCodec::Plain),
+            1 => Ok(StringCodec::Dictionary),
             _ => Err(EncodingError::BadHeader),
         }
     }
