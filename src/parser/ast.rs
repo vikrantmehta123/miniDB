@@ -1,7 +1,7 @@
 #[derive(Debug, Clone)]
 pub enum Statement {
     Insert(InsertStmt),
-    // Select(SelectStmt) later
+    Select(SelectStmt),
 }
 
 #[derive(Debug, Clone)]
@@ -19,4 +19,16 @@ pub enum Literal {
     Bool(bool),
     Str(String),
     Null,
+}
+
+#[derive(Debug, Clone)]
+pub enum Projection {
+    All,
+    Columns(Vec<String>),
+}
+
+#[derive(Debug, Clone)]
+pub struct SelectStmt {
+    pub table: String,
+    pub projection: Projection,
 }

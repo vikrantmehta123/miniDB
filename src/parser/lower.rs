@@ -1,12 +1,15 @@
 use sqlparser::ast as s;
 use crate::parser::{ParseError, Statement, InsertStmt, Literal};
+use crate::parser::ast::{SelectStmt, Projection};
 
 pub fn lower(stmt: s::Statement) -> Result<Statement, ParseError> {
     match stmt {
         s::Statement::Insert(ins) => lower_insert(ins).map(Statement::Insert),
+        s::Statement::Query(q) => lower_select(*q).map(Statement::Select),
         other => Err(ParseError::Unsupported(format!("statement: {:?}", other))),
     }
 }
+
 
 fn lower_insert(ins: s::Insert) -> Result<InsertStmt, ParseError> {
     let table = ins.table.to_string();
@@ -53,4 +56,35 @@ fn lower_value(v: s::Value) -> Result<Literal, ParseError> {
         s::Value::Null                  => Ok(Literal::Null),
         other => Err(ParseError::Unsupported(format!("literal: {:?}", other))),
     }
+}
+
+fn lower_select(query: s::Query) -> Result<SelectStmt, ParseError> {
+    let select = match *query.body {
+        s::SetExpr::Select(s) => s,
+        _ => return Err(ParseError::Unsupported("only plain SELECT supported".into())),
+    };
+    let table = select.from.into_iter().next()
+        .ok_or_else(|| ParseError::Unsupported("SELECT requires a FROM clause".into()))
+        .and_then(|t| match t.relation {
+            s::TableFactor::Table { name, .. } => Ok(name.to_string()),
+            _ => Err(ParseError::Unsupported("only simple table references supported".into())),
+        })?;
+    let projection = if select.projection.len() == 1 {
+        if let s::SelectItem::Wildcard(_) = &select.projection[0] {
+            Projection::All
+        } else {
+            lower_projection(select.projection)?
+        }
+    } else {
+        lower_projection(select.projection)?
+    };
+    Ok(SelectStmt { table, projection })
+}
+
+fn lower_projection(items: Vec<s::SelectItem>) -> Result<Projection, ParseError> {
+    let cols = items.into_iter().map(|item| match item {
+        s::SelectItem::UnnamedExpr(s::Expr::Identifier(id)) => Ok(id.value),
+        other => Err(ParseError::Unsupported(format!("unsupported projection item: {:?}", other))),
+    }).collect::<Result<Vec<_>, _>>()?;
+    Ok(Projection::Columns(cols))
 }
