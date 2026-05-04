@@ -1,22 +1,22 @@
-//! Plain encoding: values written as raw little-endian bytes, no transformation.
+//! Plain encoding: raw bytes copied through unchanged.
 
-use crate::encoding::{Primitive, EncodingError};
+use crate::encoding::EncodingError;
 
-pub fn encode<T: Primitive>(src: &[T], out: &mut Vec<u8>) {
-    for &v in src {
-        v.encode_le(out);
-    }
+pub fn encode(src: &[u8], stride: usize, out: &mut Vec<u8>) {
+    debug_assert!(stride > 0, "stride must be non-zero");
+    out.extend_from_slice(src);
 }
 
-pub fn decode<T: Primitive>(src: &[u8], out: &mut Vec<T>) -> Result<(), EncodingError> {
-    // Validate the length of the source is a multiple of T's size
-    if src.len() % T::WIDTH != 0 {
-       return Err(EncodingError::Truncated);
+pub fn decode(src: &[u8], stride: usize, out: &mut Vec<u8>) -> Result<(), EncodingError> {
+    if stride == 0 {
+        return Err(EncodingError::UnsupportedStride(stride));
     }
-    
-    for chunk in src.chunks_exact(T::WIDTH) {
-        out.push(T::decode_le(chunk));
+
+    if src.len() % stride != 0 {
+        return Err(EncodingError::Truncated);
     }
+
+    out.extend_from_slice(src);
     Ok(())
 }
 
@@ -25,54 +25,76 @@ pub fn decode<T: Primitive>(src: &[u8], out: &mut Vec<T>) -> Result<(), Encoding
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoding::Primitive;
+
+    fn encode_typed<T: Primitive>(src: &[T]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for &value in src {
+            value.encode_le(&mut out);
+        }
+        out
+    }
+
+    fn decode_typed<T: Primitive>(src: &[u8]) -> Vec<T> {
+        src.chunks_exact(T::WIDTH).map(T::decode_le).collect()
+    }
 
     #[test]
     fn roundtrip_i32_basic() {
         let xs = vec![100_i32, 105, 103, 200, 199];
+        let raw = encode_typed(&xs);
         let mut bytes = Vec::new();
-        encode(&xs, &mut bytes);
-        let mut out: Vec<i32> = Vec::new();
-        decode(&bytes, &mut out).unwrap();
+        encode(&raw, i32::WIDTH, &mut bytes);
+        let mut out = Vec::new();
+        decode(&bytes, i32::WIDTH, &mut out).unwrap();
+        let out: Vec<i32> = decode_typed(&out);
         assert_eq!(xs, out);
     }
 
     #[test]
     fn roundtrip_empty() {
         let xs: Vec<i32> = vec![];
+        let raw = encode_typed(&xs);
         let mut bytes = Vec::new();
-        encode(&xs, &mut bytes);
+        encode(&raw, i32::WIDTH, &mut bytes);
         assert!(bytes.is_empty());
-        let mut out: Vec<i32> = Vec::new();
-        decode(&bytes, &mut out).unwrap();
+        let mut out = Vec::new();
+        decode(&bytes, i32::WIDTH, &mut out).unwrap();
+        let out: Vec<i32> = decode_typed(&out);
         assert_eq!(xs, out);
     }
 
     #[test]
     fn roundtrip_u64_basic() {
         let xs = vec![0_u64, 1, u64::MAX, 42, u64::MAX / 2];
+        let raw = encode_typed(&xs);
         let mut bytes = Vec::new();
-        encode(&xs, &mut bytes);
+        encode(&raw, u64::WIDTH, &mut bytes);
         assert_eq!(bytes.len(), xs.len() * std::mem::size_of::<u64>());
-        let mut out: Vec<u64> = Vec::new();
-        decode(&bytes, &mut out).unwrap();
+        let mut out = Vec::new();
+        decode(&bytes, u64::WIDTH, &mut out).unwrap();
+        let out: Vec<u64> = decode_typed(&out);
         assert_eq!(xs, out);
     }
 
     #[test]
     fn roundtrip_i8_extremes() {
         let xs = vec![i8::MIN, -1, 0, 1, i8::MAX];
+        let raw = encode_typed(&xs);
         let mut bytes = Vec::new();
-        encode(&xs, &mut bytes);
-        let mut out: Vec<i8> = Vec::new();
-        decode(&bytes, &mut out).unwrap();
+        encode(&raw, i8::WIDTH, &mut bytes);
+        let mut out = Vec::new();
+        decode(&bytes, i8::WIDTH, &mut out).unwrap();
+        let out: Vec<i8> = decode_typed(&out);
         assert_eq!(xs, out);
     }
 
     #[test]
     fn format_u32() {
         let xs = vec![10_u32, 12, 15];
+        let raw = encode_typed(&xs);
         let mut bytes = Vec::new();
-        encode(&xs, &mut bytes);
+        encode(&raw, u32::WIDTH, &mut bytes);
 
         let expected = vec![
             10, 0, 0, 0,
@@ -81,5 +103,13 @@ mod tests {
         ];
 
         assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn decode_rejects_truncated_input() {
+        let src = vec![1_u8, 2, 3];
+        let mut out = Vec::new();
+        let err = decode(&src, 2, &mut out).unwrap_err();
+        assert_eq!(err, EncodingError::Truncated);
     }
 }
