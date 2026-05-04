@@ -2,5 +2,5 @@
 *.mrk
 *.bin
 /data
-/tasks
 /prompts
+/tests

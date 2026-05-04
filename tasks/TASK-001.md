@@ -9,7 +9,7 @@ Fix `codec_for()` in `table_writer.rs` so it returns the right codec per type in
 
 ## Steps
 
-- [ ] **Fix `codec_for()`** (`src/storage/table_writer.rs`)
+- [X] **Fix `codec_for()`** (`src/storage/table_writer.rs`)
   - `i8/u8/bool` → `Codec::Plain`
   - `i16/i32/i64/u16/u32/u64` → `Codec::Delta`
   - `f32/f64` → `Codec::Plain`

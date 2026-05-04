@@ -143,10 +143,13 @@ fn write_one_column(
 /// Codec selection lives here so column_writer stays type-blind.
 /// Today: Plain for everything. Future: read from ColumnDef once the schema
 /// carries codec metadata (e.g. Delta for timestamp columns).
-fn codec_for(_col: &ColumnDef) -> Codec {
-    Codec::Plain
+fn codec_for(col: &ColumnDef) -> Codec {
+    match col.data_type {
+        DataType::I16 | DataType::I32 | DataType::I64
+        | DataType::U16 | DataType::U32 | DataType::U64 => Codec::Delta,
+        _ => Codec::Plain,
+    }
 }
-
 
 fn scan_next_part_id(table_dir: &Path) -> io::Result<u32> {
     let mut max_id: i64 = -1;
