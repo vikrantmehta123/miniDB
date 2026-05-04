@@ -3,8 +3,6 @@
 ## Description
 Evaluate the `Predicate` tree from TASK-003 against a scanned granule to produce a boolean bitmask. Apply the mask to all projected columns before output. No granule skipping yet — correctness first.
 
-**Sprint 2 — estimated 1–2 sessions.**
-
 ---
 
 ## Steps

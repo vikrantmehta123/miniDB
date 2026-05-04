@@ -1,8 +1,8 @@
-pub use crate::analyser::{InsertError, SelectError, ScanPlan};
+pub use crate::analyser::{InsertError, ScanPlan, SelectError};
 use crate::analyser::{analyse_insert, analyse_select};
 use crate::parser::InsertStmt;
-use crate::parser::ast::SelectStmt;
 use crate::parser::Literal;
+use crate::parser::ast::SelectStmt;
 use crate::storage::column_chunk::ColumnChunk;
 use crate::storage::schema::{DataType, TableDef};
 use crate::storage::table_writer::{PartMetadata, TableWriter};
@@ -28,6 +28,20 @@ pub fn execute_select(
     let plan = analyse_select(&stmt, schema, table_dir)?;
     let reader = crate::storage::table_reader::TableReader::open(&plan.table_dir)?;
     let chunks = reader.read_all(&plan.columns)?;
+
+    let chunks = if let Some(predicate) = &stmt.where_clause {
+        let col_pairs: Vec<(&str, &ColumnChunk)> = plan
+            .columns
+            .iter()
+            .zip(chunks.iter())
+            .map(|(def, chunk)| (def.name.as_str(), chunk))
+            .collect();
+        let mask = crate::evaluator::evaluate(predicate, &col_pairs)?;
+        chunks.iter().map(|c| c.filter(&mask)).collect()
+    } else {
+        chunks
+    };
+
     Ok(chunks)
 }
 
@@ -158,6 +172,68 @@ mod tests {
         assert!(part_dir.join("uid.bin").exists());
         assert!(part_dir.join("tag.bin").exists());
         assert!(part_dir.join("ts.bin").metadata().unwrap().len() > 0);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn select_with_where_clause() {
+        let dir = std::env::temp_dir().join("tinyolap_where_test");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let schema = TableDef {
+            name: "events".into(),
+            columns: vec![
+                ColumnDef {
+                    name: "ts".into(),
+                    data_type: DataType::I64,
+                },
+                ColumnDef {
+                    name: "uid".into(),
+                    data_type: DataType::U32,
+                },
+                ColumnDef {
+                    name: "ok".into(),
+                    data_type: DataType::Bool,
+                },
+            ],
+            sort_key: vec![0],
+        };
+        TableDef::create(&dir, &schema).unwrap();
+
+        // Insert 3 parts
+        for sql in [
+            "INSERT INTO events VALUES (1, 10, false), (2, 20, true)",
+            "INSERT INTO events VALUES (3, 30, false), (4, 40, true)",
+            "INSERT INTO events VALUES (5, 50, true),  (6, 60, false)",
+        ] {
+            let crate::parser::Statement::Insert(s) = crate::parser::parse(sql).unwrap() else {
+                panic!("expected insert")
+            };
+            execute_insert(s, &schema, dir.clone()).unwrap();
+        }
+
+        // ts > 3 — should return rows with ts = 4, 5, 6
+        let sql = "SELECT * FROM events WHERE ts > 3";
+        let crate::parser::Statement::Select(s) = crate::parser::parse(sql).unwrap() else {
+            panic!("expected select")
+        };
+        let chunks = execute_select(s, &schema, dir.clone()).unwrap();
+        let ColumnChunk::I64(ts_vals) = &chunks[0] else {
+            panic!()
+        };
+        assert_eq!(ts_vals, &vec![4, 5, 6]);
+
+        // uid = 10 AND ok = false — should return only ts = 1
+        let sql = "SELECT * FROM events WHERE uid = 10 AND ok = false";
+        let crate::parser::Statement::Select(s) = crate::parser::parse(sql).unwrap() else {
+            panic!("expected select")
+        };
+        let chunks = execute_select(s, &schema, dir.clone()).unwrap();
+        let ColumnChunk::I64(ts_vals) = &chunks[0] else {
+            panic!()
+        };
+        assert_eq!(ts_vals, &vec![1]);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

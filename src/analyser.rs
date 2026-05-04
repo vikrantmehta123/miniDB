@@ -55,6 +55,7 @@ pub enum SelectError {
     UnknownTable(String),
     UnknownColumn(String),
     Io(std::io::Error),
+    EvalError(crate::evaluator::EvalError),
 }
 
 impl std::fmt::Display for SelectError {
@@ -63,6 +64,7 @@ impl std::fmt::Display for SelectError {
             SelectError::UnknownTable(t) => write!(f, "unknown table '{t}'"),
             SelectError::UnknownColumn(c) => write!(f, "unknown column '{c}'"),
             SelectError::Io(e) => write!(f, "I/O error: {e}"),
+            SelectError::EvalError(e) => write!(f, "eval error: {e}"),
         }
     }
 }
@@ -72,6 +74,13 @@ impl From<std::io::Error> for SelectError {
         SelectError::Io(e)
     }
 }
+
+impl From<crate::evaluator::EvalError> for SelectError {
+    fn from(e: crate::evaluator::EvalError) -> Self {
+        SelectError::EvalError(e)
+    }
+}
+
 
 pub struct ScanPlan {
     pub table_dir: PathBuf,
