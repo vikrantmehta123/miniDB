@@ -28,6 +28,7 @@
 - Each task file contains: **ID**, **Title**, **Description**, and the active steps being worked on. Completed steps are removed — task files are not history logs.
 - At the start of a session, ask the user which task they want to work on (or read the directory if context makes it obvious).
 - Feature scope and phasing is in `SPEC.md` at the repo root. Read it for context on what Phase 1 covers and what is deferred to Phase 2.
+- Unscoped tasks are in `Deferred.md` file. Do NOT take them up unless explicitly brought into a `TASK-<ID>.md` file.
 
 ## Build System
 - Standard `cargo` — `cargo build`, `cargo run`, `cargo test`
@@ -37,6 +38,7 @@
 - Move fast, keep it simple — this is a learning project, not production software
 - Prefer clarity over cleverness unless the clever version teaches something about Rust
 - Tests are good when they lock in correctness of a tricky piece; don't test everything
+- Stick to SOLID principles, and good design practices when organizing code. The code we structure should be maintainable and extensible easily.
 
 ## Collaboration Rules
 - **Claude must NOT write code to files.** The user types every line themselves.

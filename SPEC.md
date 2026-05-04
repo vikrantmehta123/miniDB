@@ -5,7 +5,7 @@
 ### Storage
 
 1. [X] **Abstractions**: `ColumnWriter`, `ColumnReader`, `TableWriter`, `TableReader` with LZ4 compression.
-2. [X] **Data types**: integers (`i8`–`u64`), `f32`/`f64`, `bool`, variable-length strings.
+2. [X] **Data types**: integers (`i8`–`u64`), `f32`/`f64`, `bool`, variable-length strings. All non-null columns. 
 3. [X] **Schema**: single table, frozen at startup. One column designated as the primary key (sort key).
 4. [X] Add encoding schemes like Delta, RLE.
 
@@ -34,6 +34,8 @@ SELECT x, y, agg(z) FROM defaulttable WHERE <cond> GROUP BY <cols> HAVING <cond>
 3. **Merge scheduler**: background thread that triggers merges on part count / size thresholds.
 4. **Partitioning**: data partitioned by a single column (e.g. a date). Each partition is an independent directory of parts.
 5. LowCardinality(String) type. And dictionary encoding for the same.
+6. Nullable columns. 
+
 ---
 
 ## Out of scope
