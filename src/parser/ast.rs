@@ -11,7 +11,7 @@ pub struct InsertStmt {
     pub rows: Vec<Vec<Literal>>,       // batch — outer Vec is rows
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
     Int(i64),
     UInt(u64),
@@ -27,8 +27,22 @@ pub enum Projection {
     Columns(Vec<String>),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum CmpOp {
+    Eq, Ne, Lt, Le, Gt, Ge,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Predicate {
+    Cmp { col: String, op: CmpOp, value: Literal },
+    And(Box<Predicate>, Box<Predicate>),
+    Or(Box<Predicate>, Box<Predicate>),
+    Not(Box<Predicate>),
+}
+
 #[derive(Debug, Clone)]
 pub struct SelectStmt {
     pub table: String,
     pub projection: Projection,
+    pub where_clause: Option<Predicate>,
 }

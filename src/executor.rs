@@ -1,5 +1,5 @@
 use crate::parser::{InsertStmt, Literal};
-use crate::parser::ast::{Projection, SelectStmt};
+use crate::parser::ast::{Projection, Predicate, SelectStmt};
 use crate::storage::column_chunk::ColumnChunk;
 use crate::storage::schema::{DataType, TableDef};
 use crate::storage::table_writer::{PartMetadata, TableWriter};
@@ -278,6 +278,24 @@ pub struct ScanPlan {
     pub columns: Vec<crate::storage::schema::ColumnDef>,
 }
 
+fn validate_predicate(pred: &Predicate, schema: &TableDef) -> Result<(), SelectError> {
+    match pred {
+        Predicate::Cmp { col, .. } => {
+            if schema.columns.iter().any(|c| &c.name == col) {
+                Ok(())
+            } else {
+                Err(SelectError::UnknownColumn(col.clone()))
+            }
+        }
+        Predicate::And(l, r) | Predicate::Or(l, r) => {
+            validate_predicate(l, schema)?;
+            validate_predicate(r, schema)
+        }
+        Predicate::Not(inner) => validate_predicate(inner, schema),
+    }
+}
+
+
 pub fn analyse_select(
     stmt: &SelectStmt,
     schema: &TableDef,
@@ -297,6 +315,10 @@ pub fn analyse_select(
             }).collect::<Result<Vec<_>, _>>()?
         }
     };
+    if let Some(pred) = &stmt.where_clause {
+        validate_predicate(pred, schema)?;
+    }
+
     Ok(ScanPlan { table_dir, columns })
 }
 

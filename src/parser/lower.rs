@@ -1,6 +1,6 @@
 use sqlparser::ast as s;
 use crate::parser::{ParseError, Statement, InsertStmt, Literal};
-use crate::parser::ast::{SelectStmt, Projection};
+use crate::parser::ast::{SelectStmt, Projection, Predicate, CmpOp};
 
 pub fn lower(stmt: s::Statement) -> Result<Statement, ParseError> {
     match stmt {
@@ -58,6 +58,42 @@ fn lower_value(v: s::Value) -> Result<Literal, ParseError> {
     }
 }
 
+fn lower_cmpop(op: s::BinaryOperator) -> Result<CmpOp, ParseError> {
+    match op {
+        s::BinaryOperator::Eq         => Ok(CmpOp::Eq),
+        s::BinaryOperator::NotEq      => Ok(CmpOp::Ne),
+        s::BinaryOperator::Lt         => Ok(CmpOp::Lt),
+        s::BinaryOperator::LtEq       => Ok(CmpOp::Le),
+        s::BinaryOperator::Gt         => Ok(CmpOp::Gt),
+        s::BinaryOperator::GtEq       => Ok(CmpOp::Ge),
+        other => Err(ParseError::Unsupported(format!("comparison op: {:?}", other))),
+    }
+}
+
+fn lower_predicate(e: s::Expr) -> Result<Predicate, ParseError> {
+    match e {
+        s::Expr::BinaryOp { left, op: s::BinaryOperator::And, right } =>
+            Ok(Predicate::And(Box::new(lower_predicate(*left)?), Box::new(lower_predicate(*right)?))),
+        s::Expr::BinaryOp { left, op: s::BinaryOperator::Or, right } =>
+            Ok(Predicate::Or(Box::new(lower_predicate(*left)?), Box::new(lower_predicate(*right)?))),
+        s::Expr::UnaryOp { op: s::UnaryOperator::Not, expr } =>
+            Ok(Predicate::Not(Box::new(lower_predicate(*expr)?))),
+        s::Expr::BinaryOp { left, op, right } => {
+            let col = match *left {
+                s::Expr::Identifier(id) => id.value,
+                other => return Err(ParseError::Unsupported(format!("LHS must be a column name, got: {:?}", other))),
+            };
+            let value = match *right {
+                s::Expr::Value(v) => lower_value(v.value)?,
+                other => return Err(ParseError::Unsupported(format!("RHS must be a literal, got: {:?}", other))),
+            };
+            Ok(Predicate::Cmp { col, op: lower_cmpop(op)?, value })
+        }
+        other => Err(ParseError::Unsupported(format!("unsupported predicate: {:?}", other))),
+    }
+}
+
+
 fn lower_select(query: s::Query) -> Result<SelectStmt, ParseError> {
     let select = match *query.body {
         s::SetExpr::Select(s) => s,
@@ -78,7 +114,9 @@ fn lower_select(query: s::Query) -> Result<SelectStmt, ParseError> {
     } else {
         lower_projection(select.projection)?
     };
-    Ok(SelectStmt { table, projection })
+
+    let where_clause = select.selection.map(lower_predicate).transpose()?;
+    Ok(SelectStmt { table, projection, where_clause })
 }
 
 fn lower_projection(items: Vec<s::SelectItem>) -> Result<Projection, ParseError> {
@@ -87,4 +125,31 @@ fn lower_projection(items: Vec<s::SelectItem>) -> Result<Projection, ParseError>
         other => Err(ParseError::Unsupported(format!("unsupported projection item: {:?}", other))),
     }).collect::<Result<Vec<_>, _>>()?;
     Ok(Projection::Columns(cols))
+}
+
+
+
+// Tests
+#[cfg(test)]
+mod tests {
+    use crate::parser::{parse, Statement};
+    use crate::parser::ast::{Predicate, CmpOp, Literal};
+
+    #[test]
+    fn test_where_lowering() {
+        let sql = "SELECT * FROM events WHERE ts > 1000 AND uid = 42";
+        let stmt = parse(sql).unwrap();
+        let select = match stmt {
+            Statement::Select(s) => s,
+            _ => panic!("expected SELECT"),
+        };
+        println!("{:#?}", select.where_clause);
+        assert_eq!(
+            select.where_clause,
+            Some(Predicate::And(
+                Box::new(Predicate::Cmp { col: "ts".into(),  op: CmpOp::Gt, value: Literal::Int(1000) }),
+                Box::new(Predicate::Cmp { col: "uid".into(), op: CmpOp::Eq, value: Literal::Int(42)   }),
+            ))
+        );
+    }
 }

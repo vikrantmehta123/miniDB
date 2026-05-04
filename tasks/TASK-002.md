@@ -9,21 +9,21 @@ Wire up `criterion` and establish baseline throughput numbers for the write and 
 
 ## Steps
 
-- [ ] **Add criterion**
+- [X] **Add criterion**
   - Add `criterion` to `[dev-dependencies]` in `Cargo.toml`
   - Add a `[[bench]]` entry pointing to `benches/throughput.rs`
 
-- [ ] **Write-path benchmark**
+- [X] **Write-path benchmark**
   - Generate 1M i64 values (e.g. `0..1_000_000`)
   - Benchmark `TableWriter::insert` end-to-end (includes LZ4 + fsync)
   - Report throughput in MB/s and ns/value
 
-- [ ] **Scan-path benchmark**
+- [X] **Scan-path benchmark**
   - Pre-write the same 1M rows to a temp directory in a `setup` closure
   - Benchmark `TableReader` full scan of one i64 column
   - Report throughput in MB/s
 
-- [ ] **Record baseline numbers here**
+- [X] **Record baseline numbers here**
 
 ---
 
