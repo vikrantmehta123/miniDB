@@ -1,43 +1,51 @@
-# TASK-010 — GROUP BY with Hash Aggregation
+# TASK-010 — Background Compaction: Scheduler and Reader Integration
 
 ## Description
-Implement `GROUP BY` using a hash map to partition rows into per-key accumulator states. This is the most algorithmically complex task in Phase 1 and the one interviewers will ask about.
+Wire the merger from TASK-009 into a background thread that watches part count and triggers merges automatically. Update `FullScan` / `TableReader` to use a shared, lock-guarded part list so readers never see a mid-merge part.
 
-**Sprint 4 — estimated 2–3 sessions.**
+**Prerequisite: TASK-009.**
 
 ---
 
 ## Steps
 
-- [ ] **Parser lowering** (`src/parser/lower.rs`)
-  - Detect `GROUP BY col1, col2` in the sqlparser-rs AST
-  - Carry `group_by: Vec<String>` in `Statement::Select`
-  - Validate: if GROUP BY is present, every non-aggregate SELECT expression must appear in the GROUP BY list — error otherwise
+### Shared part list
 
-- [ ] **Key type**
-  - Define `GroupKey` as a `Vec<Literal>` (one entry per GROUP BY column)
-  - Implement `Hash` and `Eq` for `GroupKey` so it can be used as a `HashMap` key
+- [ ] Wrap the part list in `Arc<RwLock<Vec<u32>>>` (part ids)
+- [ ] `FullScan` acquires a read lock at construction, clones the vec, releases immediately — queries are never blocked by the lock itself
+- [ ] `TableWriter` acquires a write lock only to append the new part id after a successful INSERT
 
-- [ ] **Keyed accumulator map**
-  - `HashMap<GroupKey, Vec<Box<dyn Accumulator>>>` — one accumulator per aggregate function per group
-  - On each row: extract the key from the GROUP BY columns, look up (or insert) the accumulator slot, feed the row's aggregate-column value
+### Part tombstoning
 
-- [ ] **Executor: GROUP BY path**
-  - Scan all required columns (GROUP BY columns + aggregate-input columns) in lock-step
-  - For each row: compute `GroupKey`, dispatch to accumulators
-  - After all parts: drain the map, call `finalize()` per group, emit one result row per group
+- [ ] When the scheduler selects a merge set, mark those part ids as `being_merged` in the shared list (e.g. `Arc<RwLock<HashSet<u32>>>` for the tombstone set)
+- [ ] `FullScan` skips tombstoned parts when cloning its working set
 
-- [ ] **HAVING clause**
-  - Parse `HAVING agg_func(col) op literal` (same grammar as WHERE but post-aggregation)
-  - Apply as a filter on the finalized rows before output
+### Scheduler (`src/compaction/scheduler.rs`)
 
-- [ ] **Integration tests**
-  - `SELECT uid, sum(ts) FROM events GROUP BY uid` — known rows, verify per-uid sums
-  - `SELECT ok, count(*) FROM events GROUP BY ok HAVING count(*) > 1`
+- [ ] Spawn a `std::thread` that polls the part list on a short timer
+- [ ] Trigger condition: part count > `MERGE_THRESHOLD` (add to `config.rs`)
+- [ ] Selection: pick the smallest-N parts by total `.bin` file size
+- [ ] Send a `MergeJob { parts: Vec<u32> }` over a `std::sync::mpsc::channel` to a worker thread
+
+### Worker thread
+
+- [ ] Receives `MergeJob`, calls `merger::merge`
+- [ ] On success: write lock → remove tombstoned ids, add merged part id
+- [ ] On failure: write lock → clear tombstones, log the error
+
+### Graceful shutdown
+
+- [ ] On REPL exit (Ctrl-D): send shutdown signal to scheduler thread; `join()` before process exit
+
+### End-to-end test
+
+- [ ] Insert 12 parts via 12 separate INSERTs
+- [ ] Wait for the scheduler to trigger (or call it directly in test)
+- [ ] Verify part count dropped; `SELECT *` returns all rows in sorted order
 
 ---
 
 ## Out of Scope
-- Multi-level GROUP BY optimization (streaming vs hash)
-- ORDER BY on aggregated results
-- Parallel hash aggregation (Phase 2)
+- Multiple concurrent merge workers
+- Merge throttling
+- External merge sort (Phase 2)

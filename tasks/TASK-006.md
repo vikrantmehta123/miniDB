@@ -1,29 +1,54 @@
-# TASK-006 — Rayon: Part-Level Parallelism
+# TASK-006 — GROUP BY with Hash Aggregation
 
 ## Description
-Parallelize the outer part loop in `TableReader` using `rayon`. Each part is independent — no shared mutable state — making this a clean data-parallel problem. After this, scan throughput scales linearly with available cores.
+Implement `GROUP BY` using a `HashMap` (via the existing `ahash` dependency) to partition rows into per-key accumulator buckets. This is the most algorithmically complex task in Phase 1 and the one interviewers at DB companies ask about most.
 
-**Sprint 3 — estimated 1 session.**
+**Prerequisite: TASK-002 and TASK-003 (all five aggregators must work).**
 
 ---
 
 ## Steps
 
-- [ ] **Add rayon** to `[dependencies]` in `Cargo.toml`
+### AST + Parser (`src/parser/ast.rs`, `lower.rs`)
 
-- [ ] **Parallelize part scan** (`src/storage/table_reader.rs`)
-  - Replace the sequential `for part in parts` loop with `parts.par_iter()`
-  - Each part produces a `Vec<ColumnChunk>`; collect into a `Vec` ordered by part index
-  - Use `rayon::iter::IndexedParallelIterator` to preserve part order in the result
+- [ ] Add `group_by: Vec<String>` to `SelectStmt`
+- [ ] In `lower_select`: detect the GROUP BY clause, extract column names
+- [ ] Validation: if GROUP BY is present, every `SelectExpr::Col` in the projection must appear in the GROUP BY list — error otherwise
 
-- [ ] **Thread safety audit**
-  - Confirm no `Rc`, `Cell`, or non-`Send` types cross the parallel boundary
-  - `File` handles are opened inside the closure — each thread opens its own, no sharing needed
+### Key type
 
-- [ ] **Benchmark**: re-run the TASK-002 scan benchmark on a multi-part dataset, compare 1 vs N cores (set `RAYON_NUM_THREADS=1` vs default)
+- [ ] Define `GroupKey(Vec<KeyValue>)` where `KeyValue` is a stripped-down `Literal` without `Null`
+- [ ] Implement `Hash` and `Eq` for `GroupKey` (derive or manual)
+- [ ] Extract a `GroupKey` from a batch row index given the GROUP BY column chunks
+
+### `GroupByAggregate` processor (`src/processors/group_by.rs`)
+
+- [ ] `GroupByAggregate::new(input: Box<dyn Processor>, group_cols: Vec<String>, agg_exprs: Vec<SelectExpr>) -> Self`
+- [ ] State: `AHashMap<GroupKey, Vec<AccumulatorState>>`
+  - One `AccumulatorState` enum variant per `AggFunc` (holds the typed state)
+- [ ] `next_batch()`:
+  - First call: drain all batches from `input`; for each row, extract `GroupKey`, look up or insert accumulator slot, feed the value; then finalize all groups and return a `Batch` with one row per group
+  - Second call: return `None`
+- [ ] Column order in output: GROUP BY columns first, then aggregate results
+
+### HAVING clause
+
+- [ ] Parse `HAVING agg_func(col) op literal` — same grammar as WHERE, post-aggregation
+- [ ] Apply as a filter on the finalized `Batch` before returning it
+
+### Pipeline wiring (`src/processors/mod.rs`)
+
+- [ ] In `build_plan`: if `group_by` is non-empty, use `GroupByAggregate` instead of `Aggregate`
+
+### Tests
+
+- [ ] `SELECT uid, sum(ts) FROM events GROUP BY uid` — known rows, verify per-uid sums
+- [ ] `SELECT ok, count(*) FROM events GROUP BY ok HAVING count(*) > 1`
+- [ ] Single-group edge case: `GROUP BY` on a column with one distinct value
 
 ---
 
 ## Out of Scope
-- Granule-level parallelism within a part (TASK-007)
-- Concurrent inserts (not in Phase 1)
+- ORDER BY on grouped results
+- Parallel hash aggregation
+- Multi-level GROUP BY

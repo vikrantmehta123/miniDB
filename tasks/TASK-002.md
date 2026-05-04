@@ -1,41 +1,63 @@
-# TASK-002 — Criterion Benchmarks
+# TASK-002 — Aggregations: AST, Parser, Pipeline Node
 
 ## Description
-Wire up `criterion` and establish baseline throughput numbers for the write and scan paths. These numbers are the "proof" behind every performance claim on a resume. Record them in this file so future comparisons are honest.
+Make `SELECT sum(ts), count(*), max(uid) FROM events WHERE ts > 100` work end-to-end. This requires extending the AST, lowering aggregate function calls, and adding an `Aggregate` processor node to the pipeline. Wire the existing `Sum` and `Max` accumulators — the remaining ones (Min, Count, Avg) come in TASK-003.
 
-**Sprint 1 — estimated 1 session.**
+**This is the OLAP use case. Without it the project doesn't justify the name.**
 
 ---
 
 ## Steps
 
-- [X] **Add criterion**
-  - Add `criterion` to `[dev-dependencies]` in `Cargo.toml`
-  - Add a `[[bench]]` entry pointing to `benches/throughput.rs`
+### AST (`src/parser/ast.rs`)
 
-- [X] **Write-path benchmark**
-  - Generate 1M i64 values (e.g. `0..1_000_000`)
-  - Benchmark `TableWriter::insert` end-to-end (includes LZ4 + fsync)
-  - Report throughput in MB/s and ns/value
+- [ ] Add `AggFunc` enum: `Sum, Max, Min, Count, Avg`
+- [ ] Add `SelectExpr` enum:
+  - `SelectExpr::Col(String)` — a plain column reference
+  - `SelectExpr::Agg { func: AggFunc, col: String }` — an aggregate call; `col` is `"*"` for `COUNT(*)`
+- [ ] Replace `Projection::Columns(Vec<String>)` with `Projection::Exprs(Vec<SelectExpr>)`
+  - `Projection::All` stays as-is; it expands to plain `Col` expressions in the analyser
 
-- [X] **Scan-path benchmark**
-  - Pre-write the same 1M rows to a temp directory in a `setup` closure
-  - Benchmark `TableReader` full scan of one i64 column
-  - Report throughput in MB/s
+### Parser lowering (`src/parser/lower.rs`)
 
-- [X] **Record baseline numbers here**
+- [ ] In `lower_projection`, detect `sqlparser::ast::Function` nodes and lower them to `SelectExpr::Agg`
+  - Map `sum(col)` → `AggFunc::Sum`, `max(col)` → `AggFunc::Max`, etc.
+  - `count(*)` → `SelectExpr::Agg { func: AggFunc::Count, col: "*".into() }`
+- [ ] Plain `Identifier` items still lower to `SelectExpr::Col`
+- [ ] Reject mixing `Col` and `Agg` without `GROUP BY` — return a clear `ParseError`
 
----
+### Analyser (`src/analyser.rs`)
 
-## Baseline Numbers (fill in after running)
+- [ ] Update `analyse_select` to handle the new `Projection::Exprs` variant
+- [ ] For each `SelectExpr::Agg`, validate the column exists in the schema (skip for `"*"`)
+- [ ] Expand `Projection::All` into `Exprs(vec![SelectExpr::Col(name) for each schema column])`
 
-| Benchmark | Throughput | Notes |
-|---|---|---|
-| write 1M i64 | ~705 MiB/s | Delta + LZ4 + fsync, ~10.8 ms/iter |
-| scan 1M i64 | ~443 MiB/s | LZ4 decompress + delta decode, ~17.2 ms/iter |
+### Aggregate processor (`src/processors/aggregate.rs`)
+
+- [ ] `Aggregate::new(input: Box<dyn Processor>, exprs: Vec<SelectExpr>) -> Self`
+- [ ] `next_batch()`: drain all batches from `input`, accumulate into per-expr state, return a single `Batch` with one row on the first call, `None` on the second
+- [ ] Dispatch per `AggFunc`:
+  - `Sum` → use `aggregator::sum::Sum<T>` for the column's concrete type
+  - `Max` → use `aggregator::max::Max<T>` (or `MaxFloat` for f32/f64)
+  - `Min`, `Count`, `Avg` → stub returning `Err(ExecutionError::InvalidData("not yet implemented"))` until TASK-003
+
+### Pipeline wiring (`src/processors/mod.rs`)
+
+- [ ] In `build_plan`: if the projection contains any `Agg` exprs, append an `Aggregate` node as the final stage (after `Filter`, before returning)
+- [ ] Pass `scan_cols` correctly: agg input columns must be in the scan set even if not in the output projection
+
+### Executor (`src/executor.rs`)
+
+- [ ] No structural change needed — the pipeline change is transparent. Update the result printing in `main.rs` if needed.
+
+### Test
+
+- [ ] `SELECT sum(ts) FROM events` on known rows — verify the sum
+- [ ] `SELECT max(uid) FROM events WHERE ok = true` — verify filter + agg compose correctly
 
 ---
 
 ## Out of Scope
-- Per-codec benchmarks (add in TASK-006 monomorphization evaluation if revisited)
-- Multi-column benchmarks
+- Min, Count, Avg accumulators (TASK-003)
+- GROUP BY (TASK-006)
+- Multiple aggregates in one query (can stub or implement — your call)

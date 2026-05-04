@@ -1,39 +1,34 @@
-# TASK-005 — WHERE: Granule Skipping via Zone Maps
+# TASK-005 — Rayon: Parallel Column Reads Within a Part
 
 ## Description
-During INSERT, compute `(min, max)` per granule per column and persist as a zone map file. At scan time, load zone maps and skip granules where the predicate cannot match. This is the core columnar optimization — the difference between "scans everything" and "a real column store."
+Within a single part, all columns are independent files. Read them in parallel using `rayon`. Combines with TASK-004 to give two levels of parallelism: across parts and across columns.
 
-**Sprint 2 — estimated 1–2 sessions.**
+**Prerequisite: TASK-004.**
 
 ---
 
 ## Steps
 
-- [ ] **Zone map format**
-  - One `<col>.zonemap` file per column per part
-  - Fixed-width records: `[min: T as 8 bytes][max: T as 8 bytes]` per granule
-  - For strings: store min/max byte length (skip value-level pruning for now)
-  - For bool: store `any_true` and `any_false` flags
+- [ ] **Identify the parallelism boundary** (`src/processors/full_scan.rs`)
+  - Currently: for each part, columns are read in a sequential `for col in &self.columns` loop
+  - Target: replace with `self.columns.par_iter().map(|col| read_column(...)).collect::<Result<Vec<_>, _>>()`
 
-- [ ] **Compute and write zone maps during INSERT** (`src/storage/column_writer.rs`)
-  - Track `min` and `max` within each granule as values are appended
-  - On granule boundary: write the `(min, max)` record
-  - Flush at the end of the column write
+- [ ] **Extract `read_column` as a standalone function**
+  - `fn read_column(part_dir: &Path, col: &ColumnDef) -> io::Result<ColumnChunk>`
+  - Must be stateless and `Send` — no borrowed state from `FullScan`
 
-- [ ] **Load zone maps during scan** (`src/storage/column_reader.rs`)
-  - On `ColumnReader::open`, read the `.zonemap` file into a `Vec<(min, max)>`
-  - Expose `can_skip_granule(granule_idx: usize, predicate: &Predicate) -> bool`
+- [ ] **Combine with part-level parallelism**
+  - Outer: `parts.par_iter()` (TASK-004)
+  - Inner: `columns.par_iter()` per part
+  - Both levels active simultaneously
 
-- [ ] **Skip in the executor scan loop**
-  - Before reading a granule, call `can_skip_granule` for each predicate leaf touching that column
-  - If all predicate columns say skip → advance past the granule without decompressing
-  - Count skipped granules (log or expose as a stat)
-
-- [ ] **Benchmark**: re-run the TASK-002 scan benchmark with a selective WHERE and measure granules read vs skipped
+- [ ] **Benchmark**
+  - Wide table (6+ columns), many parts
+  - Compare: sequential vs part-parallel vs part+column parallel
+  - Record numbers here
 
 ---
 
 ## Out of Scope
-- Bloom filters (Phase 2)
-- Primary index (`primary.idx`) — separate task if/when added
-- Zone maps for compound predicates (AND/OR pruning across multiple columns)
+- Granule-level parallelism within one column (memory bandwidth bound — not worth it)
+- Async I/O
