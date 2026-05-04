@@ -1,7 +1,6 @@
 use crate::parser::{InsertStmt, Literal};
 use crate::parser::ast::{Predicate, Projection, SelectStmt};
 use crate::storage::schema::{DataType, TableDef};
-use std::path::PathBuf;
 
 #[derive(Debug)]
 pub enum InsertError {
@@ -55,7 +54,6 @@ pub enum SelectError {
     UnknownTable(String),
     UnknownColumn(String),
     Io(std::io::Error),
-    EvalError(crate::evaluator::EvalError),
 }
 
 impl std::fmt::Display for SelectError {
@@ -64,7 +62,6 @@ impl std::fmt::Display for SelectError {
             SelectError::UnknownTable(t) => write!(f, "unknown table '{t}'"),
             SelectError::UnknownColumn(c) => write!(f, "unknown column '{c}'"),
             SelectError::Io(e) => write!(f, "I/O error: {e}"),
-            SelectError::EvalError(e) => write!(f, "eval error: {e}"),
         }
     }
 }
@@ -75,17 +72,6 @@ impl From<std::io::Error> for SelectError {
     }
 }
 
-impl From<crate::evaluator::EvalError> for SelectError {
-    fn from(e: crate::evaluator::EvalError) -> Self {
-        SelectError::EvalError(e)
-    }
-}
-
-
-pub struct ScanPlan {
-    pub table_dir: PathBuf,
-    pub columns: Vec<crate::storage::schema::ColumnDef>,
-}
 
 pub fn analyse_insert(stmt: &InsertStmt, schema: &TableDef) -> Result<(), InsertError> {
     if stmt.table != schema.name {
@@ -128,28 +114,23 @@ pub fn analyse_insert(stmt: &InsertStmt, schema: &TableDef) -> Result<(), Insert
 pub fn analyse_select(
     stmt: &SelectStmt,
     schema: &TableDef,
-    table_dir: PathBuf,
-) -> Result<ScanPlan, SelectError> {
+) -> Result<(), SelectError> {
     if stmt.table != schema.name {
         return Err(SelectError::UnknownTable(stmt.table.clone()));
     }
-    let columns = match &stmt.projection {
-        Projection::All => schema.columns.clone(),
-        Projection::Columns(names) => {
-            names.iter().map(|name| {
-                schema.columns.iter()
-                    .find(|col| &col.name == name)
-                    .cloned()
-                    .ok_or_else(|| SelectError::UnknownColumn(name.clone()))
-            }).collect::<Result<Vec<_>, _>>()?
+    if let Projection::Columns(names) = &stmt.projection {
+        for name in names {
+            if schema.columns.iter().all(|c| &c.name != name) {
+                return Err(SelectError::UnknownColumn(name.clone()));
+            }
         }
-    };
+    }
     if let Some(pred) = &stmt.where_clause {
         validate_predicate(pred, schema)?;
     }
-
-    Ok(ScanPlan { table_dir, columns })
+    Ok(())
 }
+
 
 fn literal_compatible(lit: &Literal, dt: &DataType) -> bool {
     match (lit, dt) {

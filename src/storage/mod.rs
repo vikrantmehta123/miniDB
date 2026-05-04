@@ -5,6 +5,5 @@ pub mod mark;
 pub mod schema;
 pub mod string_column_reader;
 pub mod string_column_writer;
-pub mod table_reader;
 pub mod table_writer;
 pub mod part_discovery;

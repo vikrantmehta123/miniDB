@@ -1,4 +1,4 @@
-pub use crate::analyser::{InsertError, ScanPlan, SelectError};
+pub use crate::analyser::{InsertError, SelectError};
 use crate::analyser::{analyse_insert, analyse_select};
 use crate::parser::InsertStmt;
 use crate::parser::Literal;
@@ -25,25 +25,54 @@ pub fn execute_select(
     schema: &TableDef,
     table_dir: PathBuf,
 ) -> Result<Vec<ColumnChunk>, SelectError> {
-    let plan = analyse_select(&stmt, schema, table_dir)?;
-    let reader = crate::storage::table_reader::TableReader::open(&plan.table_dir)?;
-    let chunks = reader.read_all(&plan.columns)?;
+    analyse_select(&stmt, schema)?;
 
-    let chunks = if let Some(predicate) = &stmt.where_clause {
-        let col_pairs: Vec<(&str, &ColumnChunk)> = plan
-            .columns
-            .iter()
-            .zip(chunks.iter())
-            .map(|(def, chunk)| (def.name.as_str(), chunk))
-            .collect();
-        let mask = crate::evaluator::evaluate(predicate, &col_pairs)?;
-        chunks.iter().map(|c| c.filter(&mask)).collect()
-    } else {
-        chunks
-    };
+    let mut plan = crate::processors::build_plan(table_dir, &stmt, schema)
+        .map_err(exec_err_to_select_err)?;
 
-    Ok(chunks)
+    let mut acc: Vec<Option<ColumnChunk>> = Vec::new();
+
+    while let Some(result) = plan.next_batch() {
+        let batch = result.map_err(exec_err_to_select_err)?;
+        if acc.is_empty() {
+            acc = batch.columns.into_iter().map(Some).collect();
+        } else {
+            for (dst, src) in acc.iter_mut().zip(batch.columns) {
+                extend_chunk(dst.as_mut().unwrap(), src);
+            }
+        }
+    }
+
+    Ok(acc.into_iter().flatten().collect())
 }
+
+fn exec_err_to_select_err(e: crate::processors::processor::ExecutionError) -> SelectError {
+    match e {
+        crate::processors::processor::ExecutionError::Io(e) => SelectError::Io(e),
+        crate::processors::processor::ExecutionError::InvalidData(msg) => {
+            SelectError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, msg))
+        }
+    }
+}
+
+fn extend_chunk(dst: &mut ColumnChunk, src: ColumnChunk) {
+    match (dst, src) {
+        (ColumnChunk::I8(d),   ColumnChunk::I8(s))   => d.extend(s),
+        (ColumnChunk::I16(d),  ColumnChunk::I16(s))  => d.extend(s),
+        (ColumnChunk::I32(d),  ColumnChunk::I32(s))  => d.extend(s),
+        (ColumnChunk::I64(d),  ColumnChunk::I64(s))  => d.extend(s),
+        (ColumnChunk::U8(d),   ColumnChunk::U8(s))   => d.extend(s),
+        (ColumnChunk::U16(d),  ColumnChunk::U16(s))  => d.extend(s),
+        (ColumnChunk::U32(d),  ColumnChunk::U32(s))  => d.extend(s),
+        (ColumnChunk::U64(d),  ColumnChunk::U64(s))  => d.extend(s),
+        (ColumnChunk::F32(d),  ColumnChunk::F32(s))  => d.extend(s),
+        (ColumnChunk::F64(d),  ColumnChunk::F64(s))  => d.extend(s),
+        (ColumnChunk::Bool(d), ColumnChunk::Bool(s)) => d.extend(s),
+        (ColumnChunk::Str(d),  ColumnChunk::Str(s))  => d.extend(s),
+        _ => {}
+    }
+}
+
 
 fn sort_and_transpose(stmt: InsertStmt, schema: &TableDef) -> Vec<ColumnChunk> {
     let mut rows = stmt.rows;
@@ -58,7 +87,6 @@ fn sort_and_transpose(stmt: InsertStmt, schema: &TableDef) -> Vec<ColumnChunk> {
         std::cmp::Ordering::Equal
     });
 
-    let n_cols = schema.columns.len();
     let mut chunks: Vec<ColumnChunk> = schema
         .columns
         .iter()
@@ -128,7 +156,6 @@ fn push_literal(chunk: &mut ColumnChunk, lit: Literal) {
 mod tests {
     use super::*;
     use crate::storage::schema::{ColumnDef, DataType, TableDef};
-    use std::path::PathBuf;
 
     fn make_schema() -> TableDef {
         TableDef {

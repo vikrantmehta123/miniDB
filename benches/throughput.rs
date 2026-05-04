@@ -1,9 +1,10 @@
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use std::hint::black_box;
 use tempfile::tempdir;
+use tinyolap::processors::full_scan::FullScan;
+use tinyolap::processors::processor::Processor;
 use tinyolap::storage::column_chunk::ColumnChunk;
 use tinyolap::storage::schema::{ColumnDef, DataType, TableDef};
-use tinyolap::storage::table_reader::TableReader;
 use tinyolap::storage::table_writer::TableWriter;
 
 const N: usize = 1_000_000;
@@ -47,9 +48,11 @@ fn bench_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("scan");
     group.throughput(Throughput::Bytes(bytes));
     group.bench_function("1M i64", |b| {
-        let reader = TableReader::open(dir.path()).unwrap();
         b.iter(|| {
-            black_box(reader.read_all(&col_def).unwrap());
+            let mut scan = FullScan::new(dir.path().to_path_buf(), col_def.clone()).unwrap();
+            while let Some(batch) = scan.next_batch() {
+                black_box(batch.unwrap());
+            }
         });
     });
     group.finish();

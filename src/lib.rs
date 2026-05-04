@@ -3,6 +3,7 @@ pub mod config;
 pub mod encoding;
 pub mod executor;
 pub mod parser;
+pub mod processors;
 pub mod storage;
 pub mod analyser;
 mod evaluator;

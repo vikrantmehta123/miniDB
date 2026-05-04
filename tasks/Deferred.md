@@ -14,19 +14,5 @@ which could be worth expploring.
 
 3. Delta-Decode and Dictionary Lookups are SIMD paths. So potentially this could be implemented.
 
-4. Operator-based execution engine — streaming, query plan, parallel scan.
-   The flat `execute_select` pipeline works for correctness but has three
-   known limitations to address together:
-
-   - **Query plan construction**: the analyser should produce a `PhysicalPlan`
-     tree (`Scan`, `Filter`, `Project`, ...) and the executor should walk it
-     generically via a `PhysicalOperator::next() -> Result<Option<Batch>>`
-     trait, rather than hard-coding the pipeline in `execute_select`.
-
-   - **Memory-bounded output**: `read_all()` materializes the full dataset.
-     Once the scan operator exists, it should emit one granule at a time so
-     callers can stream results without holding the whole table in memory.
-
-   - **Parallel part reads**: parts are independent; `rayon::par_iter()` over
-     part IDs in the scan operator is a natural fit once the operator owns its
-     own iteration loop.
+4. Memory-bounded SELECT output — promoted to TASK-015 (streaming deferred to after
+   the physical plan is in place).
