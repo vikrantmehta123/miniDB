@@ -4,6 +4,7 @@ mod encoding;
 mod executor;
 mod parser;
 mod storage;
+mod analyser;
 
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
