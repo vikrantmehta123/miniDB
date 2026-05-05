@@ -2,6 +2,7 @@ use crate::aggregator::Aggregator;
 use crate::aggregator::max::MaxAgg;
 use crate::aggregator::sum::SumAgg;
 use crate::aggregator::min::MinAgg;
+use crate::aggregator::avg::AvgAgg;
 use crate::parser::ast::AggFunc;
 use crate::processors::processor::ExecutionError;
 use crate::storage::schema::DataType;
@@ -16,8 +17,9 @@ pub fn build(func: AggFunc, input: DataType) -> Result<Box<dyn Aggregator>, Exec
         AggFunc::Sum => Ok(Box::new(SumAgg::new(input)?)),
         AggFunc::Max => Ok(Box::new(MaxAgg::new(input)?)),
         AggFunc::Min => Ok(Box::new(MinAgg::new(input)?)),
+        AggFunc::Avg => Ok(Box::new(AvgAgg::new(input)?)),
 
-        AggFunc:: Count | AggFunc::Avg => {
+        AggFunc:: Count => {
             Err(ExecutionError::InvalidData(
                 format!("aggregate function {:?} is not yet implemented", func)
             ))

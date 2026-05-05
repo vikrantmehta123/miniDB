@@ -11,53 +11,42 @@ Make `SELECT sum(ts), count(*), max(uid) FROM events WHERE ts > 100` work end-to
 
 ### AST (`src/parser/ast.rs`)
 
-- [ ] Add `AggFunc` enum: `Sum, Max, Min, Count, Avg`
-- [ ] Add `SelectExpr` enum:
-  - `SelectExpr::Col(String)` — a plain column reference
-  - `SelectExpr::Agg { func: AggFunc, col: String }` — an aggregate call; `col` is `"*"` for `COUNT(*)`
-- [ ] Replace `Projection::Columns(Vec<String>)` with `Projection::Exprs(Vec<SelectExpr>)`
-  - `Projection::All` stays as-is; it expands to plain `Col` expressions in the analyser
+- [X] Add `AggFunc` enum: `Sum, Max, Min, Count, Avg`
+- [X] Add `SelectExpr` enum: `Col(String)` | `Agg { func: AggFunc, col: String }`
+- [X] Replace `Projection::Columns(Vec<String>)` with `Projection::Exprs(Vec<SelectExpr>)`
 
 ### Parser lowering (`src/parser/lower.rs`)
 
-- [ ] In `lower_projection`, detect `sqlparser::ast::Function` nodes and lower them to `SelectExpr::Agg`
-  - Map `sum(col)` → `AggFunc::Sum`, `max(col)` → `AggFunc::Max`, etc.
-  - `count(*)` → `SelectExpr::Agg { func: AggFunc::Count, col: "*".into() }`
-- [ ] Plain `Identifier` items still lower to `SelectExpr::Col`
-- [ ] Reject mixing `Col` and `Agg` without `GROUP BY` — return a clear `ParseError`
+- [X] Detect `Function` nodes in the SELECT list, lower to `SelectExpr::Agg`
+- [X] `count(*)` → `SelectExpr::Agg { func: AggFunc::Count, col: "*".into() }`
+- [X] Reject mixing `Col` and `Agg` without GROUP BY
 
 ### Analyser (`src/analyser.rs`)
 
-- [ ] Update `analyse_select` to handle the new `Projection::Exprs` variant
-- [ ] For each `SelectExpr::Agg`, validate the column exists in the schema (skip for `"*"`)
-- [ ] Expand `Projection::All` into `Exprs(vec![SelectExpr::Col(name) for each schema column])`
+- [X] Update `analyse_select` to handle `Projection::Exprs`
+- [X] Validate agg column names; skip validation for `"*"`
+- [X] Expand `Projection::All` into `Exprs(vec![SelectExpr::Col(...)])` for each schema column
 
 ### Aggregate processor (`src/processors/aggregate.rs`)
 
-- [ ] `Aggregate::new(input: Box<dyn Processor>, exprs: Vec<SelectExpr>) -> Self`
-- [ ] `next_batch()`: drain all batches from `input`, accumulate into per-expr state, return a single `Batch` with one row on the first call, `None` on the second
-- [ ] Dispatch per `AggFunc`:
-  - `Sum` → use `aggregator::sum::Sum<T>` for the column's concrete type
-  - `Max` → use `aggregator::max::Max<T>` (or `MaxFloat` for f32/f64)
-  - `Min`, `Count`, `Avg` → stub returning `Err(ExecutionError::InvalidData("not yet implemented"))` until TASK-003
+- [X] `Aggregate::new(input, aggs, input_idx, output_schema)`
+- [X] Drain all input batches, accumulate into per-agg state, return a single 1-row `Batch`
+- [X] `done` flag so second call returns `None`
 
 ### Pipeline wiring (`src/processors/mod.rs`)
 
-- [ ] In `build_plan`: if the projection contains any `Agg` exprs, append an `Aggregate` node as the final stage (after `Filter`, before returning)
-- [ ] Pass `scan_cols` correctly: agg input columns must be in the scan set even if not in the output projection
-
-### Executor (`src/executor.rs`)
-
-- [ ] No structural change needed — the pipeline change is transparent. Update the result printing in `main.rs` if needed.
+- [X] `build_plan`: if projection contains any `Agg` exprs, append `Aggregate` node
+- [X] `aggregator::factory::build(func, DataType)` dispatches to correct accumulator
+- [ ] `Count` and `Avg` return `InvalidData` stub — complete in TASK-003
 
 ### Test
 
-- [ ] `SELECT sum(ts) FROM events` on known rows — verify the sum
-- [ ] `SELECT max(uid) FROM events WHERE ok = true` — verify filter + agg compose correctly
+- [X] Parser test: `SELECT sum(ts), count(*), max(uid)` — assert lowered AST
+- [ ] Integration test: `SELECT sum(ts) FROM events` on known rows
+- [ ] Integration test: `SELECT max(uid) FROM events WHERE ok = true`
 
 ---
 
 ## Out of Scope
 - Min, Count, Avg accumulators (TASK-003)
 - GROUP BY (TASK-006)
-- Multiple aggregates in one query (can stub or implement — your call)
