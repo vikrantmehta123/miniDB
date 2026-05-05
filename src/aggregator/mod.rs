@@ -3,6 +3,7 @@ pub mod top_k;
 pub mod max;
 pub mod min;
 pub mod avg;
+pub mod count;
 pub mod factory;
 
 use crate::processors::processor::ExecutionError;
