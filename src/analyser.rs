@@ -1,7 +1,6 @@
-use crate::parser::{InsertStmt, Literal};
 use crate::parser::ast::{Predicate, Projection, SelectExpr, SelectStmt};
+use crate::parser::{InsertStmt, Literal};
 use crate::storage::schema::{DataType, TableDef};
-
 
 #[derive(Debug)]
 pub enum InsertError {
@@ -73,7 +72,6 @@ impl From<std::io::Error> for SelectError {
     }
 }
 
-
 pub fn analyse_insert(stmt: &InsertStmt, schema: &TableDef) -> Result<(), InsertError> {
     if stmt.table != schema.name {
         return Err(InsertError::UnknownTable(stmt.table.clone()));
@@ -112,17 +110,16 @@ pub fn analyse_insert(stmt: &InsertStmt, schema: &TableDef) -> Result<(), Insert
     Ok(())
 }
 
-pub fn analyse_select(
-    mut stmt: SelectStmt,
-    schema: &TableDef,
-) -> Result<SelectStmt, SelectError> {
+pub fn analyse_select(mut stmt: SelectStmt, schema: &TableDef) -> Result<SelectStmt, SelectError> {
     if stmt.table != schema.name {
         return Err(SelectError::UnknownTable(stmt.table.clone()));
     }
 
     stmt.projection = match stmt.projection {
         Projection::All => {
-            let exprs = schema.columns.iter()
+            let exprs = schema
+                .columns
+                .iter()
                 .map(|c| SelectExpr::Col(c.name.clone()))
                 .collect();
             Projection::Exprs(exprs)
@@ -151,9 +148,16 @@ pub fn analyse_select(
         validate_predicate(pred, schema)?;
     }
 
+    // Validate that every GROUP BY column exists in the schema.
+    // Name resolution (string → index) happens later in the planner.
+    for col_name in &stmt.group_by {
+        if schema.columns.iter().all(|c| &c.name != col_name) {
+            return Err(SelectError::UnknownColumn(col_name.clone()));
+        }
+    }
+
     Ok(stmt)
 }
-
 
 fn literal_compatible(lit: &Literal, dt: &DataType) -> bool {
     match (lit, dt) {
