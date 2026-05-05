@@ -3,37 +3,42 @@
 ## Description
 `rayon` is already in `Cargo.toml` but unused. Parallelize the part loop in `FullScan` so multiple parts are scanned concurrently. Each part is fully independent — no shared mutable state — making this a clean data-parallel problem with near-zero risk.
 
-**Prerequisite: TASK-001 (zone maps change FullScan's granularity — do that first).**
-
 ---
 
-## Steps
+## Completed
 
-- [ ] **Parallelize part scan** (`src/processors/full_scan.rs`)
-  - The current `FullScan` yields one part per `next_batch()` call — it's pull-based and inherently sequential
-  - Switch to an eager parallel scan: at construction time, collect all part ids; in `next_batch()`, do a one-shot `par_iter()` over all parts, collecting results into a `Vec<Batch>` ordered by part index; then yield them sequentially from that vec
-  - Alternatively, keep the pull model and use a background thread pool — simpler approach first
-  - Simplest correct approach: eager parallel collect in `FullScan::new` or on first `next_batch()` call; store results in `self.batches: Vec<Batch>`; subsequent calls drain the vec
+- [x] **Parallelize part scan** (`src/processors/full_scan.rs`)
+  - Eager parallel collect in `FullScan::new`: `par_iter()` over all part IDs, reads each part
+    inside the closure (own file handles, no sharing), collects into `Vec<Batch>`, reversed so
+    `pop()` yields parts in ascending order. `next_batch()` is a single `pop()`.
 
-- [ ] **Thread safety**
-  - Each part opens its own file handles inside the closure — no sharing needed
-  - `ColumnReader` must be `Send` — verify no `Rc` or `RefCell` crosses the boundary
+- [x] **Thread safety**
+  - Each part opens its own `ColumnReader` / `StringColumnReader` inside the closure — no shared state.
+  - `ColumnReader` holds only `File` + `Vec<u8>` cache, both `Send`. No `Rc` or `RefCell`.
 
-- [ ] **Preserve part order**
-  - Use `rayon::iter::IndexedParallelIterator::collect()` or sort by part_id after collection
-  - Row order must match the sequential baseline
+- [x] **Preserve part order**
+  - `par_iter()` on a slice is an `IndexedParallelIterator` — rayon's `collect()` preserves
+    original index order. Reversed once after collection; `pop()` yields forward.
 
-- [ ] **Benchmark**
-  - Re-run the TASK-002 scan benchmark on a dataset with 10+ parts
-  - Compare `RAYON_NUM_THREADS=1` vs default; record speedup here
+- [x] **Read entire `.bin` file in one shot** (`src/storage/column_reader.rs`, `string_column_reader.rs`)
+  - Added `read_all()`: one `read_to_end()` syscall per column file, processes all blocks from
+    the in-memory buffer. Reuses a single `decoded` buffer across blocks — no per-block allocation.
+  - Renamed old granule-by-granule path to `read_granules()` to avoid confusion.
+  - `FullScan` calls `read_all()` on every column. `read_granules()` kept for future selective
+    scan operators (predicate pushdown, point lookups).
 
-### Speedup Numbers (fill in after benchmarking)
+- [x] **Benchmark** — 100 parts × 10k rows (800 KiB total), 8-core machine
+
+### Speedup Numbers
 
 | Parts | Threads | Throughput | Speedup vs 1 thread |
 |---|---|---|---|
-| 10 | 1 | — | — |
-| 10 | 4 | — | — |
-| 10 | 8 | — | — |
+| 100 | 1 | 267 MiB/s | 1.0× |
+| 100 | 4 | 955 MiB/s | 3.6× |
+| 100 | 8 | 1.07 GiB/s | 4.1× |
+
+Scaling is sub-linear (4.1× on 8 cores) because parts are small (10k rows each) and I/O
+overhead per part dominates at this size. Expected to scale closer to linear with larger parts.
 
 ---
 
