@@ -1,4 +1,5 @@
 mod aggregator;
+mod cli;
 mod config;
 mod encoding;
 mod executor;
@@ -8,14 +9,12 @@ mod analyser;
 mod evaluator;
 mod processors;
 
-use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
-
 use storage::schema::TableDef;
 
-fn main() -> io::Result<()> {
-    let table_dir = PathBuf::from("data").join("tinyolap_smoke");
-    std::fs::create_dir_all(&table_dir)?;
+fn main() {
+    let table_dir = PathBuf::from(config::DATA_DIR);
+    std::fs::create_dir_all(&table_dir).expect("failed to create data dir");
 
     let schema = TableDef::open(&table_dir).unwrap_or_else(|_| {
         eprintln!("No schema.json found in {:?}. Create one first.", table_dir);
@@ -23,23 +22,16 @@ fn main() -> io::Result<()> {
     });
 
     println!("tinyOLAP ready. Table: '{}'", schema.name);
-    println!("Type SQL and press Enter. Ctrl-D to quit.\n");
+    println!("Type SQL and press Enter. Ctrl-C or Ctrl-D to quit.\n");
 
-    let stdin = io::stdin();
+    let mut repl = cli::Repl::new().expect("failed to init CLI");
     loop {
-        print!("> ");
-        io::stdout().flush()?;
-
-        let mut line = String::new();
-        if stdin.lock().read_line(&mut line)? == 0 {
-            break; // EOF
-        }
-        let sql = line.trim();
+        let Some(sql) = repl.next_line("> ") else { break };
         if sql.is_empty() {
             continue;
         }
 
-        match crate::parser::parse(sql) {
+        match crate::parser::parse(&sql) {
             Err(e) => eprintln!("parse error: {e:?}"),
             Ok(stmt) => {
                 println!("lowered AST: {stmt:?}");
@@ -62,6 +54,4 @@ fn main() -> io::Result<()> {
             }
         }
     }
-
-    Ok(())
 }

@@ -1,0 +1,31 @@
+use rustyline::error::ReadlineError;
+use rustyline::DefaultEditor;
+
+pub struct Repl {
+    editor: DefaultEditor,
+}
+
+impl Repl {
+    pub fn new() -> rustyline::Result<Self> {
+        let editor = DefaultEditor::new()?;
+        Ok(Self { editor })
+    }
+
+    pub fn next_line(&mut self, prompt: &str) -> Option<String> {
+        match self.editor.readline(prompt) {
+            Ok(line) => {
+                let trimmed = line.trim().to_string();
+                if !trimmed.is_empty() {
+                    let _ = self.editor.add_history_entry(&trimmed);
+                }
+                Some(trimmed)
+            }
+            Err(ReadlineError::Interrupted) => None,
+            Err(ReadlineError::Eof) => None,
+            Err(e) => {
+                eprintln!("readline error: {e}");
+                None
+            }
+        }
+    }
+}
