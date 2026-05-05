@@ -1,788 +1,267 @@
-# tinyOLAP — Storage Optimizations & Hardening Notes
+# tinyOLAP — Query Execution Optimizations
 
-This is a long-form review of the storage layer (writer + reader) with worked
-examples. The goal is intuition: *why* a change matters, not just *what* to
-change. Encoding optimizations (FOR / delta / RLE / dictionary) are tracked
-separately and are out of scope here.
-
-Workload assumptions baked in:
-- Inserts are bounded — at most a few thousand rows, worst case ~100k, ~1 MB
-  of data per `insert()` call.
+Workload assumptions:
+- Inserts are bounded — at most a few thousand rows, worst case ~100k, ~1 MB per insert.
 - A part is atomic per insert (one `insert()` produces one finalized part).
 - Reads are batch scans / aggregations, not point lookups.
 
 ---
 
-## 1. Correctness & Durability
+## Defining Throughput
 
-### 1.1 fsync — currently missing, must add
+**Uncompressed bytes of column data processed per second**, end-to-end from query
+submission to aggregated result. Concretely: `(total_rows × bytes_per_row) /
+query_wall_time`. This accounts for both I/O and CPU work and scales with data size.
 
-The writer today does `BufWriter::flush()` and then returns `Ok`. That only
-pushes bytes from the user-space buffer into the **OS page cache**. If the
-machine loses power one second later, the OS hasn't written anything to the
-SSD yet — your "successful" insert is gone, and you may end up with a
-half-written part directory that the reader will choke on.
-
-`fsync` (via `File::sync_all`) is the syscall that says: "flush this file's
-dirty pages and metadata down to stable storage and don't return until the
-device confirms." Until you call it, you have no durability guarantee.
-
-For a part-atomic format you need three fsyncs per insert:
-
-1. `bin.sync_all()` — every column's `.bin` file
-2. `mrk.sync_all()` — every column's `.mrk` file
-3. After `fs::rename(tmp_dir → part_dir)`, open the **table directory** and
-   `sync_all()` it. This is the part people forget. The rename is recorded
-   as a directory entry change; on ext4/xfs that change can sit in cache
-   too. Without fsyncing the directory, a crash can leave the part files on
-   disk but no directory entry pointing at them.
-
-The order matters: fsync the *contents* before the rename, then fsync the
-*directory* after. That gives you "either the part is fully there, or it
-isn't" — which is the atomicity guarantee you said you want.
-
-Cost: a few ms per part on SSD. For ~1 MB inserts this is the dominant cost,
-but it's the price of durability. A future optimization is a group-commit
-WAL where many inserts share one fsync.
-
-### 1.2 `stream_position()` on `BufWriter` — minor, can keep as-is
-
-Original concern: in [column_writer.rs:75](src/column_writer.rs#L75) you
-call `self.bin.stream_position()`. `BufWriter` *does* track buffered bytes
-correctly (it adds the buffered byte count to the underlying file's
-position), so this returns the right value. There's no bug.
-
-**Why I flagged it anyway:** it's a small consistency wart. The string
-writer tracks `block_offset` manually as a `u64` field. The numeric writer
-asks the `BufWriter` for it. Both produce the same answer, but two different
-mechanisms means two different things to test and two different ways to
-introduce a future bug.
-
-Worked example of where it could bite — *if* the writer ever changes:
-```text
-// Imagine someone refactors flush_block to compress in chunks:
-self.bin.write_all(&header)?;        // buffered
-let pos = self.bin.stream_position()?; // <-- now BufWriter says (file_pos + 4)
-                                       // but is that what we want as the
-                                       // "block_offset"? Header or post-header?
-self.bin.write_all(&payload)?;
+The full scan pipeline:
 ```
-Manual tracking forces you to write `self.block_offset += header.len() +
-payload.len();` after the writes — which is explicit about the contract.
-`stream_position()` hides that, which is fine until it isn't.
-
-**Verdict given your constraints:** leave it. It works. Just be aware that
-the two writers have a stylistic mismatch.
-
-### 1.3 `metadata().len()` for `bin_bytes` — concrete failure mode
-
-In [column_writer.rs:97](src/column_writer.rs#L97):
-```rust
-self.bin.flush()?;
-let bin_bytes = self.bin.get_ref().metadata()?.len();
+Disk → [I/O read] → compressed bytes → [LZ4 decompress] → raw bytes
+     → [codec decode] → Vec<T> → [batch assemble] → [aggregate]
 ```
 
-`metadata()` calls `fstat()`. The size returned is the file's logical size
-*as the kernel currently reports it*. Two issues:
-
-1. **It's a syscall** — and one you don't need. After the final `flush()`,
-   the position you've been tracking (`stream_position()` or your manual
-   counter) already equals the file size. Just use that.
-2. **Subtle race**: on filesystems where `mmap` and `write` interact (or on
-   network filesystems like NFS) a `stat` immediately after a `write` has
-   been observed to lag. Unlikely on a local ext4 SSD, but it's a
-   "phantom-correct" pattern — works 99.9% of the time, fails weirdly.
-
-Worked example of the difference:
-```text
-WriterA: writes 1000 bytes, flushes, calls metadata().len()  → 1000  ✓
-WriterB: writes 1000 bytes, flushes, calls stream_position() → 1000  ✓ (free)
-```
-Same answer, but WriterB needs no extra syscall and doesn't depend on the
-filesystem's stat consistency.
-
-**Action:** replace `metadata().len()` with the position you're already
-tracking. After `flush()`, `bin.stream_position()?` is correct and free.
-
-### 1.4 `u32` length prefix — not a bug at your scale
-
-`compress_prepend_size` writes a `u32` length prefix, and you write your own
-`u32` framing on top. A single block can't exceed ~64 KB (your
-`BLOCK_BUFFER_SIZE * 2` cap), so 4 bytes is fine forever. Just leave a
-`debug_assert!(compressed.len() <= u32::MAX as usize)` so future-you doesn't
-silently truncate after a refactor.
-
-### 1.5 `MarkWriter` buffers everything in memory
-
-`MarkWriter::write` extends an in-memory `Vec<u8>` and only writes on
-`flush()`. At 24 bytes per mark and ~100 marks per 1 MB insert, this is 2.4
-KB — totally fine for your workload. Skip.
-
-### 1.6 Cache `TableDef` in `TableWriter`
-
-`TableWriter::open` reads the schema once. Good. `TableWriter::insert`
-doesn't re-read it (I misread earlier). No change needed.
-
-### 1.7 Concurrent writer race on `next_part_id`
-
-`AtomicU32::fetch_add` makes part-id allocation safe *within* a single
-`TableWriter`. Two `TableWriter` instances (two processes, or two opens in
-the same process) can both pick id `42` and clobber each other.
-
-Worked example:
-```text
-Process A: TableWriter::open  → scans dir, finds max=41, next=42
-Process B: TableWriter::open  → scans dir, finds max=41, next=42
-Process A: insert → writes tmp_part_00042 → renames to part_00042
-Process B: insert → writes tmp_part_00042 → renames to part_00042
-                    └── overwrites A's part! Data loss.
-```
-Fix options, in increasing rigor:
-- Document "single writer per table" and crash if a second one opens.
-- Use a lockfile (`flock` on a `table.lock` file) — one syscall, blocks
-  multiple writers cleanly.
-- Centralize id allocation in a manifest file with atomic CAS.
-
-For tinyOLAP, a lockfile is the right call.
+Each stage is a potential bottleneck.
 
 ---
 
-## 2. Performance — Hot Path Allocations
+## Layer 1: I/O
 
-This is the single biggest win in the codebase right now. Worth understanding
-deeply.
+### 1.1 Read Entire `.bin` File in One Shot
 
-### 2.1 `to_le_bytes_vec(&self) -> Vec<u8>` — per-value heap allocation
+Currently `ColumnReader` seeks to each block offset and reads just that block. For
+a full scan, the whole file is read anyway — one `read_to_end()` per column file is
+faster:
+- Fewer syscalls (1 vs. 1 per block).
+- The OS issues a larger sequential read, saturating disk bandwidth better.
+- Eliminates seek overhead entirely.
 
-#### The Problem
+Highest-ROI I/O change for the read path. No new dependencies.
 
-Look at the trait:
-```rust
-fn to_le_bytes_vec(&self) -> Vec<u8> {
-    self.to_le_bytes().to_vec()
-}
-```
+### 1.2 `posix_fadvise(POSIX_FADV_SEQUENTIAL)`
 
-Two steps unpacked:
+Hints to the Linux kernel that reads will be sequential. The kernel increases its
+read-ahead window, prefetching the next pages before you ask for them. Requires a
+thin `libc` call. Reduces per-block I/O latency by hiding it behind the read-ahead.
 
-1. `self.to_le_bytes()` returns `[u8; 8]` for an `i64` — a **stack** array.
-   Free: no allocator, just a stack-pointer bump.
-2. `.to_vec()` is the expensive part. `Vec<u8>` is heap-backed. `.to_vec()`
-   does:
-   - `malloc(8)` — ask the allocator for 8 bytes of heap.
-   - copy the 8 bytes from the stack array into the heap.
-   - return a `Vec<u8>` owning that heap allocation.
-
-Then the caller does `extend_from_slice(&v.to_le_bytes_vec())`, which copies
-the 8 bytes *again* into `block_buf`. The temporary `Vec<u8>` falls out of
-scope and `free(8)` releases the heap allocation.
-
-**Per `i64` value:** 1 `malloc`, 1 `free`, 2 byte-copies. For 8 bytes of
-data.
-
-**Cost at 100k rows:** ~100k mallocs + 100k frees. At ~10–50 ns each, that
-is ~3–6 ms of pure allocator overhead. The actual work (memcpy + LZ4 on
-~800 KB) takes ~200 µs. **Allocator bookkeeping is ~30× the cost of the
-real work.** That is the disease.
-
----
-
-#### Fix A — the simple fix (recommended starting point)
-
-Change the trait to write into a buffer the caller already owns:
-
-```rust
-pub trait IDataType: Sized + Copy {
-    fn name() -> &'static str;
-    fn extend_le_bytes(&self, out: &mut Vec<u8>);
-    fn from_le_bytes(bytes: &[u8]) -> Self;
-}
-
-impl IDataType for i64 {
-    fn name() -> &'static str { "Int64" }
-    fn extend_le_bytes(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.to_le_bytes());
-    }
-    fn from_le_bytes(bytes: &[u8]) -> Self {
-        Self::from_le_bytes(bytes.try_into().unwrap())
-    }
-}
-```
-
-`self.to_le_bytes()` is the same `[u8; 8]` stack array as before. We slice
-it (`&[u8; 8]` coerces to `&[u8]`) and `extend_from_slice` copies the 8
-bytes directly into `out`. **No `Vec<u8>` is created. No allocator is
-touched.**
-
-Caller in the writer becomes:
-```rust
-v.extend_le_bytes(&mut self.block_buf);
-```
-
-Result for 100k rows: **0 mallocs, 0 frees.** This single change captures
-~90% of the §2 win, and the diff is tiny.
-
----
-
-#### Fix B — bulk memcpy via `bytemuck` (deferred — implement later)
-
-Even after Fix A, the writer still loops over values one at a time:
-```rust
-for v in values {                  // 100k iterations
-    v.extend_le_bytes(&mut buf);   // 8-byte copy per iteration
-}
-```
-The CPU is doing 100,000 small copies. The compiler may auto-vectorize, but
-there's no guarantee. The deeper insight: `&[i64]` in RAM and "N
-little-endian i64s on disk" have the **identical byte layout** on a
-little-endian machine. The bytes are *already* arranged correctly. Why
-copy them in 8-byte chunks when one big memcpy would do?
-
-##### What `bytemuck` is
-
-A small crate (~1000 lines, no macros, no codegen) whose job is: **safely
-reinterpret a slice of one type as a slice of another, with compile-time
-checks that the cast can't cause UB.**
-
-```rust
-let values: &[i64] = &[1, 2, 3, 4];
-let bytes:  &[u8]  = bytemuck::cast_slice(values);
-// bytes.len() == 32, points at the same memory as `values`.
-// Zero copy. Zero allocation. Just a different view of the same bytes.
-```
-
-Then `out.extend_from_slice(bytes)` is **one** memcpy of the whole chunk —
-SIMD-optimized in the libc/stdlib implementation, runs near memory
-bandwidth.
-
-##### Why we need a library for this
-
-In Rust, reinterpreting types is normally `unsafe` because of UB hazards:
-
-- **Alignment.** Reading an `i64` from an unaligned pointer is UB on some
-  CPUs (and generates slow code on others). `&[u8]` has alignment 1; `&[i64]`
-  needs alignment 8. Casting bytes-to-typed needs an alignment check.
-- **Invalid bit patterns.** A `bool` must be `0x00` or `0x01`. A reference
-  must be non-null and aligned. A `char` must be a valid Unicode scalar.
-  Reinterpreting random bytes as any of these is UB.
-- **Padding.** A `struct { a: u8, b: u32 }` has 3 padding bytes whose
-  contents are uninitialized; exposing them is UB.
-
-`bytemuck` handles this with a marker trait, `Pod` ("Plain Old Data"),
-which encodes the contract: "every bit pattern is a valid value, no
-padding, no invariants." A type opts in by deriving or implementing `Pod`.
-All raw numeric types (`i8`–`u64`, `f32`, `f64`) impl `Pod`. **`bool` does
-not** (only 2 of 256 bit patterns are valid). References don't. Structs
-need explicit opt-in.
-
-By making types prove `Pod`, `bytemuck::cast_slice` is sound *and* safe —
-no `unsafe` block in your code.
-
-##### The bool wrinkle
-
-Because `bool: !Pod`, the bytemuck path doesn't apply to bool columns. Two
-ways to handle it:
-- Keep a manual loop for bool: `out.extend(values.iter().map(|&b| b as u8))`.
-  Allocation-free, just not a single memcpy. Fine — bool columns are rare
-  and small.
-- Eventually switch bool to a bit-packed representation (8× compression for
-  free, see §5.2). Then bool's "encode" is bit-packing, not a memcpy
-  anyway, so the question dissolves.
-
-##### The endianness assumption
-
-`bytemuck::cast_slice(&[i64]) -> &[u8]` reinterprets memory in **native**
-byte order. tinyOLAP runs on x86_64 (LE), and the on-disk format is LE, so
-they coincide. On a hypothetical big-endian target, the cast would silently
-produce wrong-endian bytes. Pin this with a compile-time check at the top
-of `data_type.rs`:
-```rust
-#[cfg(not(target_endian = "little"))]
-compile_error!("tinyOLAP assumes a little-endian target");
-```
-
-##### The reader-side alignment caveat
-
-Going `&[u8] → &[i64]` is harder than the write direction. The decompressed
-block is a `Vec<u8>`; a sub-slice `&block[start..end]` is only `i64`-aligned
-if `start` happens to be a multiple of 8. `bytemuck::cast_slice` checks
-alignment at runtime and **panics** on mismatch.
-
-Two paths:
-- **`chunks_exact(8)` + `from_le_bytes` loop.** No alignment issue, no
-  unsafe. Allocation-free into a pre-reserved `Vec<T>`. The compiler usually
-  auto-vectorizes the loop. Simpler; recommended.
-- **Pre-resize a `Vec<T>` then memcpy bytes into it.** The destination is
-  `T`-aligned by construction (Vec's allocation is always `T`-aligned).
-  Costs one memset (zero-fill) plus one memcpy. Truly bulk.
-
-##### Worked comparison
-
-| Approach | mallocs/100k rows | copies | Complexity |
-|---|---|---|---|
-| Today (`to_le_bytes_vec`) | 100,000 | 200,000 small | trivial |
-| Fix A (`extend_le_bytes` per value) | 0 | 100,000 small | trivial |
-| Fix B (bytemuck bulk memcpy) | 0 | 1 big memcpy | adds dep, more concepts |
-
-For 1024 `i64` values (one granule):
-```text
-Today:                     Fix A:                      Fix B:
-  1024 mallocs               0 mallocs                   0 mallocs
-  1024 frees                 0 frees                     0 frees
-  1024 × 8B copy (to Vec)    0                           0
-  1024 × 8B copy (extend)    1024 × 8B copy              1 × 8192B memcpy
-  ─────────────────          ──────────────              ────────────────
-  ~30 µs allocator           ~5–10 µs                    ~1 µs
-  + 30 µs of copies
-```
-
-##### When to come back for Fix B
-
-After Fix A is in and verified, Fix B is worth it when:
-- Profiling shows `extend_from_slice` or the per-value loop dominating.
-- A bulk reader API is being added (the reader-side memcpy path matters
-  more once aggregations are in the picture).
-- You want a slice-shaped trait anyway (e.g., for SIMD encoding kernels).
-
-Fix B's diff also requires reshaping the trait to operate on `&[Self]` (so
-each impl can choose bulk vs. per-element internally), and chunking input
-in `write_chunk` along granule boundaries. Not hard, but more moving parts
-than Fix A.
-
----
-
-**Plan of record:** apply Fix A now. Defer Fix B until profiling justifies
-it or until a bulk reader API forces the trait reshape.
-
-### 2.2 `from_le_bytes` per element on read — same disease
-
-In [column_reader.rs:74-78](src/column_reader.rs#L74-L78):
-```rust
-for _ in 0..count {
-    let v = T::from_le_bytes(&block[cursor..cursor + elem_size]);
-    out.push(v);
-    cursor += elem_size;
-}
-```
-
-Each iteration does:
-- A bounds-checked slice
-- `try_into()` → `[u8; N]` (small copy)
-- `T::from_le_bytes` (a transmute on LE)
-- `Vec::push` — possibly reallocating if `out` outgrows capacity
-
-You allocated `out` with the right capacity, so `push` is fine. But the
-per-element loop still costs you a copy and the loop overhead.
-
-**Bulk fix:** the decompressed `block` is already `&[u8]`. The granule
-range `&block[start..end]` is too. On LE, that's bit-identical to a
-`&[T]` of length `(end-start)/sizeof(T)`. So:
-```rust
-let typed: &[T] = bytemuck::cast_slice(&block[start..end]);
-out.extend_from_slice(typed);  // one memcpy
-```
-One bounds check + one memcpy + one allocation, instead of `count` of
-each. For a granule of 1024 `i64`s: ~1 µs vs ~10–20 µs.
-
-**Even better for scans (no copy at all):** return `&[T]` borrowing from
-the cached block. The caller iterates without the granule ever materializing
-into a `Vec<T>`. This is the Apache Arrow model and the reason aggregation
-engines are fast.
-
-### 2.3 Why this is the dominant issue
-
-Storage engines spend their CPU on three things: I/O, compression, and
-moving bytes between buffers. You can't do much about (1) and (2) — they
-are what they are. But (3) is where naive code burns 5-10× more cycles than
-necessary, because every "small" allocation or copy multiplies by row count.
-
-A useful mental model: **for batch operations, do `O(1)` work per
-*granule*, not per *row***. The current `to_le_bytes_vec` /
-`from_le_bytes` loops violate this. Every other "make it faster" trick
-(SIMD, prefetch, parallelism) is downstream of fixing this.
-
----
-
-## 3. Performance — String Encoding
-
-You asked me to re-explain point 4. Here's the long version.
-
-### 3.1 Current format
-
-For each string in a granule, the writer emits:
-```
-[u32 length][utf8 bytes][u32 length][utf8 bytes]...
-```
-
-To read string #5, the reader has to walk strings 0–4: read length, skip
-that many bytes, read length, skip that many bytes, … This is **O(N) per
-random access** within a granule.
-
-To return the strings, the reader does:
-```rust
-let s = std::str::from_utf8(&block[cursor..cursor+len])?.to_owned();
-out.push(s);
-```
-`to_owned()` allocates a new `String` (heap), memcpys the UTF-8 bytes into
-it. One allocation per string. 1024 allocations per granule.
-
-### 3.2 Parquet/Arrow-style format: split arrays
-
-Store the granule as **two parallel arrays**:
-```
-offsets: [u32; N+1]   = [0, 5, 11, 11, 18, ...]   ← byte offsets into values
-values:  [u8; total]  = "applebanana...kiwi"      ← all utf-8 concatenated
-```
-String `i` is `&values[offsets[i] .. offsets[i+1]]`. No length prefixes
-embedded in the data; lengths are derived from offset deltas.
-
-### 3.3 Why this is better, with intuition
-
-**Random access is O(1).** Two array lookups, one slice. Today: walk from
-start. For batch scans this matters because you can skip strings that fail
-a predicate without reading them.
-
-**Cache behaviour.** Offsets are tiny (4 bytes each) and contiguous — they
-fit in L1. The values array is one big sequential blob. Modern CPUs love
-sequential reads. The current interleaved layout makes the prefetcher work
-harder.
-
-**Zero-copy reads.** The reader can return `Vec<&str>` borrowing into the
-cached block — no per-string `String` allocation. For 1024 strings, that's
-1024 mallocs avoided per granule.
-
-**Smaller in many cases.** If your average string is short (say 8 bytes),
-the length prefix is 50% overhead today (4 of every 12 bytes). Offsets
-amortize: `4 * (N+1)` total instead of `4 * N` inline. Same size today,
-but offsets compress *brilliantly* (deltas between offsets are small
-positive ints — perfect for FOR/bit-packing later).
-
-**Plays nicely with dictionary encoding later.** When you swap raw values
-for dict-codes, the offsets array stays the same conceptually (now offsets
-into a code array). Today's interleaved format doesn't generalize.
-
-### 3.4 Worked size example
-
-100 strings averaging 16 bytes each:
-- **Today:** `100 * (4 + 16) = 2000` bytes; reader does 100 length parses.
-- **Split:** `(100+1)*4 + 100*16 = 2004` bytes; reader does 0 length
-  parses, returns 100 `&str` slices into the same buffer.
-
-Same bytes on disk, but the read path is dramatically simpler and
-allocation-free. And once you compress the offsets (delta + bit-pack), the
-split layout pulls ahead on size too.
-
----
-
-## 4. Performance — Reader Path
-
-### 4.1 Single-block cache (point 5 originally)
-
-Your reader keeps one decompressed block in memory and evicts on the next
-block. Worried me earlier because random access across blocks is pessimal —
-but you said batch scans only. **For sequential scans this is optimal.**
-You read every granule in order, the cache is hit for every granule in the
-same block, and you decompress each block exactly once. Skip.
-
-The one tweak: when you do start scanning multiple columns in parallel, you
-want the cache *per column reader*, not shared. You already have this.
-
-### 4.2 `Vec<T>` allocation per `read_granule` (point 6)
-
-Every call to `read_granule` allocates a new `Vec<T>` and returns it by
-value. For a scan of N granules, that's N allocations and N drops. Most of
-those `Vec`s have the same capacity (1024 elements) — you're hitting the
-allocator with the exact same `malloc(8192)` over and over.
-
-**Fix:** scan API that reuses a buffer.
-```rust
-fn read_granule_into(&mut self, idx: usize, out: &mut Vec<T>) -> io::Result<()>;
-```
-Caller allocates one `Vec<T>` with `with_capacity(GRANULE_SIZE)`, calls
-`out.clear(); reader.read_granule_into(i, &mut out);` per granule. Zero
-allocations after the first granule.
-
-Worked numbers, scanning 1000 granules of i64:
-- Today: 1000 mallocs of 8 KB = ~50 µs of allocator overhead, plus
-  fragmentation pressure.
-- Reused buffer: 1 malloc of 8 KB = ~50 ns total. **Three orders of
-  magnitude.**
-
-For string columns the savings are bigger because each `String` inside the
-`Vec<String>` is its own allocation.
-
-**Even better — borrowed scan:** `fn next_granule(&mut self) -> io::Result
-<&[T]>` returns a slice into the cache. Zero copy, zero allocation. The
-caller's loop body operates on `&[T]` and never owns the data. This is what
-column engines do for aggregations — your `SUM(column)` kernel is just
-`slice.iter().sum()` over each granule.
-
-### 4.3 `pread` / positioned I/O (point 7)
+### 1.3 `pread` / Positioned I/O
 
 Today's reader does:
 ```rust
 self.bin.seek(SeekFrom::Start(mark.block_offset))?;
 self.bin.read_exact(&mut compressed)?;
 ```
-That's two syscalls: `lseek` + `read`. `lseek` mutates the file's
-"current position" — which is **shared state** on the file descriptor.
 
-`pread` (`FileExt::read_exact_at` on Unix) is one syscall and takes the
-offset as an argument. Doesn't touch the cursor.
+That's two syscalls and mutates the file's shared current-position cursor.
+`FileExt::read_exact_at` (Unix `pread`) is one syscall, takes the offset as an
+argument, and does not touch the cursor.
 
-**Why it matters for tinyOLAP:**
-1. **One syscall is faster than two.** ~500 ns saved per granule read.
-   Not huge per-granule, but adds up at scale.
-2. **No shared mutable cursor → can read from multiple threads with `&File`,
-   not `&mut File`.** This is the bigger win. To scan two columns in
-   parallel today you need two `File` opens or a `Mutex<File>`. With
-   `pread` you can `Arc<File>` and have N threads issue reads concurrently.
-   The kernel handles the seeking internally per request.
+The bigger win: no shared mutable cursor means multiple threads can hold `Arc<File>`
+and issue concurrent reads without a `Mutex`. This directly unblocks column-level
+parallelism within a part (§2.2 below).
 
-Worked example — parallel column scan:
-```text
-seek+read:  Mutex<File> → threads serialize on the mutex → no parallelism
-pread:      Arc<File>   → all threads issue independent positioned reads
-                          → kernel + SSD do them concurrently
-```
+### 1.4 `mmap`
 
-### 4.4 `mmap` (point 8)
+Maps file contents into virtual address space. Reading becomes pointer arithmetic
+into a `&[u8]`; the kernel pages blocks in on demand.
 
-`mmap` maps the file's contents into your process's virtual address space.
-Reading the file becomes pointer arithmetic into a `&[u8]` — the kernel
-handles paging blocks in on demand.
+- **Zero-copy**: compressed bytes are already a `&[u8]` — skip the read-into-buffer copy.
+- **Trivial parallelism**: multiple threads dereference the same region. No locks.
+- **`.mrk` files are ideal**: the mark file is a packed array of fixed-size records.
+  With `#[repr(C)]` + `bytemuck::Pod`, `cast_slice(&mmap)` gives you `&[Mark]` for
+  free — zero parse cost, zero allocation.
 
-**Why it's compelling for a columnar reader:**
-- **Zero-copy.** Today you `read_exact` into a `Vec<u8>`, decompress into
-  another `Vec<u8>`. With mmap, the compressed bytes are *already* a
-  `&[u8]` — you skip the read-into-buffer copy.
-- **OS-managed cache.** The page cache is shared across processes and
-  managed by the kernel's LRU. Your single-block cache is replaced by
-  "whatever the kernel decided to keep resident".
-- **Trivial parallelism.** Multiple threads dereference the same mmap
-  region. No locks, no `pread`.
-- **Marks file is perfect for mmap.** Your `.mrk` is a packed array of
-  `Mark` structs. With `#[repr(C)]` + `bytemuck::Pod`, mmapping it gives
-  you `&[Mark]` for free — zero parse cost, zero allocation. Today you
-  `read_to_end` into a `Vec<u8>` and parse 24 bytes at a time.
+**Caveat:** mmap I/O errors become `SIGBUS`, not `Result::Err`. A truncated file
+crashes the process instead of returning an error. Read-only mmap is safe; avoid
+mmap for writes.
 
-**Caveats:**
-- mmap I/O errors become `SIGBUS`, not `Result::Err`. A truncated file
-  will crash the process when you read into the missing region. This is
-  the main reason production systems sometimes prefer `pread` despite the
-  speed.
-- Memory accounting is weirder — `top` shows mapped-but-not-resident pages
-  oddly. Operationally annoying but not a correctness problem.
-- Random writes through mmap are a footgun. Read-only mmap (which is your
-  use case) is safe and simple.
+**Recommendation:** mmap the `.mrk` files now (large win, low risk). For `.bin`,
+use `pread` first (errors are recoverable), move to mmap later if profiling warrants it.
 
-**Recommendation for tinyOLAP:** mmap the `.mrk` files (huge win, zero
-risk). For `.bin`, start with `pread` (simpler, errors are recoverable).
-Move to mmap later if profiling says decompression-target allocation is a
-hotspot.
+### 1.5 Async I/O (`io_uring`)
 
-### 4.5 Per-column pipelining (point 9)
+The ceiling for single-machine I/O throughput. Instead of blocking threads on reads,
+submit all read requests to the kernel simultaneously and process completions as they
+arrive. NVMe SSDs have hardware queues of 64K requests — synchronous reads with 8
+threads leave most of that queue empty.
 
-`rayon::par_iter` splits the columns across worker threads. Each worker
-runs `write_one_column` start-to-finish. This is fine when columns are
-similar in size. It breaks down when one column is much bigger (e.g. a
-string column with long values, vs. an i32 id column).
-
-Worked example, 8 columns, one is 10× bigger:
-```text
-par_iter (today):
-  thread 0:  [================================================] big col
-  thread 1:  [====]                                              col 2
-  thread 2:  [====]                                              col 3
-  thread 3:  [====]                                              col 4
-             ^—— 7 threads idle while col 0 finishes
-  total wall time = max column time
-
-Pipelined:
-  producer thread: read input rows → fan out per-column channels
-  worker per column: pull from channel, encode, compress, write
-  Each column makes progress independently; small columns finish early
-  and free their thread.
-  total wall time ≈ max column time still — BUT...
-```
-
-For your workload (1 MB inserts, ~100k rows max), a single insert is
-small enough that the rayon parallelism is already overkill. Pipelining
-matters when:
-- Inserts are streaming (the spec hints at batching being a future thing)
-- One column dominates (very wide strings)
-- You want to overlap encode+compress+write with the next batch's
-  encode+compress
-
-**Recommendation:** keep rayon for now. Revisit when you have larger
-batches or streaming inserts.
-
-### 4.6 mmap for `.mrk` (point 10, expanded)
-
-Mentioned above — worth its own line. The mark file is a perfectly packed
-array of fixed-size records. On read today you do:
-```rust
-let mut buf = Vec::new();
-self.file.read_to_end(&mut buf)?;
-buf.chunks_exact(24).map(Mark::from_bytes).collect()
-```
-For 100 marks: 1 read syscall, 1 alloc of 2.4 KB, 100 parses, 1 alloc of
-the result `Vec<Mark>`. Total ~5 µs.
-
-With `repr(C)` + mmap:
-```rust
-let mmap = Mmap::map(&file)?;
-let marks: &[Mark] = bytemuck::cast_slice(&mmap);
-```
-Zero allocations, zero parses. ~50 ns. The reader holds the `Mmap`
-alongside the `&[Mark]` slice (lifetime-tied).
-
-Side note: you currently allocate 24 bytes per mark but only use 16. Drop
-to `[u8; 16]` (or use the extra 8 bytes for something — see §6).
+`tokio-uring` or `glommio` expose this on Linux. Architecturally invasive (the whole
+pipeline must become async). Defer until the synchronous path is profiled and confirmed
+to be I/O-bound after the simpler wins are taken.
 
 ---
 
-## 5. API & Structure
+## Layer 2: CPU (Decompression + Decode)
 
-### 5.1 `IDataType::size_of()` — redundant
+### 2.1 `target-cpu=native` in Release Builds
 
-`std::mem::size_of::<T>()` is a const intrinsic. The reader already uses
-it on line 65. Drop the method from the trait. One less thing to keep
-consistent across impls.
+lz4_flex has SIMD-accelerated paths for x86_64 that only activate when the compiler
+knows the target supports AVX2/SSE4.2. Add to `.cargo/config.toml`:
 
-### 5.2 `bool` storage — 8× compression for free
+```toml
+[profile.release]
+rustflags = ["-C", "target-cpu=native"]
+```
 
-Today: 1 byte per bool. A bitmap (1 bit per bool, packed 8-to-a-byte) is
-8× smaller and compresses better afterward. This is encoding territory
-which you flagged as TBD — noting it here for completeness.
+Can **double decompression throughput** with zero code changes. Trivial to do.
 
-### 5.3 Nullability — design now or pay later
+### 2.2 Column-Level Parallelism Within a Part (TASK-005)
 
-No column today supports `NULL`. Real OLAP queries care about nullability
-(`COUNT(*)` vs `COUNT(col)` differ when there are nulls). Arrow's model:
-each column has an optional **validity bitmap**, 1 bit per row, 1=valid
-0=null. Stored as a sibling file (`.null`) or a sidecar inside the block.
+Currently, for a part with 10 columns, those 10 columns are read and decompressed
+sequentially inside the rayon closure. Each column's decompression is fully independent.
+With `pread` / `Arc<File>` (§1.3), multiple threads can issue concurrent reads on the
+same file descriptor, unlocking column-level parallelism without opening multiple file
+handles.
 
-Why design now: retrofitting nullability touches every reader, every
-writer, every encoding. Adding the bitmap from the start costs a few
-hundred lines; adding it later is a refactor.
+For wide tables (20+ columns), this is the next major throughput lever after part-level
+parallelism.
 
-### 5.4 `ColumnChunk` enum + 12-arm matches
+### 2.3 Operate on Encoded Data (Pushdown into Codec)
 
-`table_writer.rs` and `table_reader.rs` both have a 12-arm match on
-`DataType`. Adding a new dtype means edits in 4+ places. A trait-object
-approach (`Box<dyn ColumnHandler>` keyed on dtype, with `write_chunk` and
-`read_granule` methods) collapses this to one-file changes.
+For some aggregations, full decode is unnecessary:
+- `COUNT(*)` never needs to decode — just read the mark count from `part.meta`.
+- `MIN`/`MAX` on sorted columns = just the first/last granule (or read directly from
+  `part.meta` if min/max is stored there).
+- `SUM` over delta-encoded sorted integers: the partial sum over the encoded deltas
+  avoids decoding every intermediate value.
 
-This is mostly a "growing pains" call — fine while there are 12 dtypes;
-gets ugly at 30. For now, leave it.
+Very complex to implement generally, but enormous speedup for specific cases. ClickHouse's
+`MergeTree` achieves near-constant-time min/max queries this way.
 
-### 5.5 `PhantomData<T>` in `ColumnWriter`
+---
 
-`ColumnWriter<T>` parameterizes the struct only because `write_chunk`
-needs `T`. You could make the struct non-generic and put the type
-parameter on `write_chunk` only. The benefit is downstream code can hold
-a `Vec<ColumnWriter>` without enum dispatch. Minor; defer.
+## Layer 3: Memory and Cache
 
-### 5.6 `part.meta` — the most important missing piece
+### 3.1 Parallel Part Scan (rayon) — DONE in TASK-004
 
-A part today is "whatever files are in the directory". You can't ask:
-- How many rows?
-- What's the min/max of column X? (predicate pushdown)
-- What dtype was column X when this part was written? (schema evolution)
-- Is the part complete? (crash recovery)
-- What was the encoding? (forward compat)
+Each part is a fully independent, disjoint set of data. `FullScan` now uses
+`rayon::par_iter()` over all part IDs in `new()`, reads every part in parallel, and
+collects into a `Vec<Batch>` (reversed so `pop()` yields parts in forward order).
+`next_batch()` is a `pop()`.
 
-A `part.meta` file written **last** (after all `.bin` and `.mrk` are
-fsynced) and itself fsynced before the rename solves all of this:
-```text
+**Why eager collect beats bounded/chunked for this workload:**
+- Rayon work-stealing keeps all threads saturated continuously — no synchronization
+  barrier between chunks.
+- Aggregation (SUM/COUNT/AVG) is trivially fast relative to I/O + decompression,
+  so there is no downstream backpressure that would benefit from bounded buffering.
+- Tradeoff: peak memory = entire dataset. Acceptable for a learning project.
+
+**Order guarantee:** `par_iter()` on a slice is an `IndexedParallelIterator` — rayon's
+`collect()` preserves the original index order without a manual sort.
+
+### 3.2 Granule-Level Streaming Aggregation
+
+**Current model:** `read_all()` → full `Vec<T>` for the entire column → hand to
+aggregator. For a 10M-row `i64` column, that is 80 MB allocated, used once, freed.
+
+**Better model:** process one granule at a time, aggregate immediately, discard:
+```rust
+for each granule:
+    let slice = reader.next_granule()?;  // &[T] borrowed from block cache
+    acc += slice.iter().sum::<T>();       // sum without materializing
+    // granule bytes freed on next iteration
+```
+
+Working set stays in L1 cache (GRANULE_SIZE=512 × 8 bytes = 4 KB per granule).
+Eliminates the large per-column allocation entirely. Requires a borrowed-scan reader
+API (`fn next_granule(&mut self) -> io::Result<&[T]>`) and either a new processor
+path or a `process_granule` method that bypasses `next_batch()`.
+
+### 3.3 Projection Pushdown — Verify It Works
+
+`FullScan` already accepts a `columns: Vec<ColumnDef>` and only reads those columns.
+Verify the executor is actually pruning the column list before constructing `FullScan`.
+A `SELECT SUM(price) FROM events` that inadvertently reads `user_id` and `name` wastes
+I/O proportional to those columns' sizes. Free throughput if the analyser is not already
+doing this.
+
+### 3.4 Batch Size Tuning
+
+Currently one part = one batch. Parts with very different row counts give rayon's
+work-stealing unequal work units — one thread can do 10× the work of others. Splitting
+at granule boundaries (512 rows each) gives much finer-grained load balancing.
+
+---
+
+## Layer 4: Query Planning
+
+### 4.1 Zone Maps / Min-Max Pruning (TASK-001)
+
+Store min/max per part in `part.meta` at write time. At query time, skip entire parts
+where the WHERE clause cannot match. For `WHERE ts > X` on sorted data, every part
+written before timestamp X is skipped without touching disk.
+
+**This reduces I/O from O(total_data) to O(matching_data).** No amount of parallelism
+or decompression speed can beat not reading data at all. A 10 ms query vs. a 10 s query
+for selective predicates. Requires `part.meta` (§5.1 below) as a prerequisite.
+
+### 4.2 Late Materialization
+
+Current model: read all columns → apply filter → aggregate.
+
+Better model for selective queries:
+1. Read only the filter column.
+2. Compute a bitmask of matching row indices.
+3. Use the bitmask to read only matching values from other columns.
+
+For a query matching 1% of rows, you read 1% of the data for non-filter columns.
+ClickHouse calls this "late materialization" — it is a primary reason columnar stores
+outperform row stores on analytical queries. Implementation requires the filter and
+projection processors to cooperate on a shared bitmask rather than operating on full
+materialized batches independently.
+
+---
+
+## Supporting Infrastructure
+
+### 5.1 `part.meta`
+
+A part today is "whatever files are in the directory". You cannot ask how many rows it
+has, what the min/max of a column is, or whether the part is complete.
+
+A `part.meta` file written **last** (after all `.bin` and `.mrk` are fsynced) and itself
+fsynced before the rename solves all of this:
+```
 part_00042/
   user_id.bin
   user_id.mrk
-  email.bin
-  email.mrk
+  price.bin
+  price.mrk
   part.meta   ← written and fsynced last
 ```
-Crash recovery: any part dir without a valid `part.meta` is incomplete and
-gets deleted on startup. **This is how you actually achieve atomic parts.**
-The rename trick alone is necessary but not sufficient — without a sentinel
-file, a half-written part dir that happens to contain the right filenames
-would look complete.
 
-Contents (rough):
-- magic + version
-- row count
-- per-column: name, dtype, null count, min, max, encoding id, byte size,
-  block count, granule count, optional checksum
-- writer timestamp / writer id
+Crash recovery: any part directory without a valid `part.meta` is incomplete and gets
+deleted on startup. Contents: magic + version, row count, per-column min/max/null count/
+encoding/byte size, writer timestamp.
 
-This unlocks the entire query optimizer: "this part's `user_id` min/max is
-[100, 200], the query asks `WHERE user_id = 5`, skip the part entirely."
-For a scan workload, that's the difference between a 10 ms query and a 10 s
-query.
+This unlocks zone maps (§4.1) and correct crash recovery in one change.
 
-### 5.7 Per-block checksums
+### 5.2 Per-Block Checksums
 
-Today, a single bit-flip in a `.bin` file causes either:
-- LZ4 returns garbage (data corruption silently goes through), or
-- LZ4 panics on a bad header (process dies)
-
-Store an `xxhash3_64` (3-5 ns/byte, faster than LZ4) of each compressed
-block alongside its length:
-```text
+A single bit-flip in a `.bin` file causes either silent data corruption or an lz4 panic.
+Store an `xxhash3_64` of each compressed block:
+```
 [u32 compressed_len][u64 hash][compressed bytes]
 ```
-On read, hash the bytes and compare. Mismatch → return an error, log,
-quarantine the part. This is cheap insurance. One bad SSD sector
-otherwise corrupts a whole table silently.
+On read, hash and compare. Mismatch → return an error and quarantine the part.
 
-### 5.8 Magic byte + format version
+### 5.3 Magic Bytes + Format Version
 
-First 8 bytes of every `.bin` and `.mrk`: `b"TINYOLAP"` + a `u8` version.
-A reader that opens a v2 file written by v1 code (or vice versa) should
-fail loudly, not parse garbage. Six bytes of disk now saves a debugging
-weekend later.
+First 8 bytes of every `.bin` and `.mrk`: `b"TINYOLAP"` + a `u8` format version.
+A reader opening a v2 file with v1 code should fail loudly, not parse garbage.
 
 ---
 
-## 6. Smaller Cleanups
+## Priority Order
 
-- `mark.rs:12` claims `[u8; 24]` but only fills 16. Either drop to `[u8;
-  16]` or use the extra 8 bytes for something useful: rows-in-granule is
-  the obvious candidate (lets the reader compute `count` without diffing
-  with the next mark).
-- `string_column_reader.rs:73` `.to_owned()` clones every string out of
-  the cached block. See §3 — a borrowed-scan API removes this entirely.
-- `string_column_writer.rs` uses verbose `OpenOptions::new()...` where
-  `File::create` would do. Numeric writer already does the short form.
-- `block_buf: Vec::with_capacity(BLOCK_BUFFER_SIZE * 2)`: the `* 2` is a
-  fudge factor for granule overflow. Either size exactly and seal at
-  threshold, or document why 2× is the safe over-estimate.
-- `column_writer.rs:92` resets `rows_in_current_granule = 0` then calls
-  `flush_block`, not `seal_granule`. The trailing partial granule never
-  gets a mark. The reader compensates because it uses
-  "next-mark-or-end-of-block" for the granule's end. **This works but is
-  asymmetric** with the string writer, which seals trailing partials. Pick
-  one convention and stick to it; document why in a comment.
-
----
-
-## 7. Suggested Priority Order
-
-Given your constraints (atomic-per-insert, batch scans, ~1 MB inserts):
-
-1. **fsync correctness** (§1.1) — non-negotiable.
-2. **Kill `to_le_bytes_vec` allocation + `from_le_bytes` per-element**
-   (§2.1, §2.2) — biggest perf win, smallest diff.
-3. **`part.meta` + magic/version** (§5.6, §5.8) — unlocks crash recovery
-   and future planner work.
-4. **Per-block checksum** (§5.7) — cheap insurance.
-5. **String split-array layout** (§3) — needed before any string-side
-   optimization makes sense.
-6. **`pread` on `.bin`, mmap on `.mrk`** (§4.3, §4.6) — cleaner concurrency
-   story, modest perf.
-7. **Borrowed-scan reader API** (§4.2) — sets up the aggregation engine.
-8. **Nullability bitmap** (§5.3) — design now, retrofit is painful.
-
-Everything below this line (encoding schemes, pipelined writers, trait-
-object dispatch) is deferrable and you've already flagged most of it.
+| # | Optimization | Section | Impact | Effort |
+|---|---|---|---|---|
+| 1 | `target-cpu=native` | §2.1 | Medium | Trivial |
+| 2 | Read entire `.bin` file in one shot | §1.1 | High | Low |
+| 3 | Verify projection pushdown | §3.3 | High | Low |
+| 4 | `part.meta` + magic/version | §5.1, §5.3 | Unlocks zone maps | Medium |
+| 5 | Per-block checksum | §5.2 | Correctness | Low |
+| 6 | Zone maps / min-max pruning | §4.1 | Very high (selective queries) | Medium |
+| 7 | `pread` on `.bin`, mmap on `.mrk` | §1.3, §1.4 | Medium + unblocks col parallelism | Medium |
+| 8 | Column-level parallelism within a part | §2.2 | High (wide tables) | Medium |
+| 9 | Granule-level streaming aggregation | §3.2 | High (large datasets) | Medium |
+| 10 | Late materialization | §4.2 | Very high (selective queries) | High |
+| 11 | Async I/O (`io_uring`) | §1.5 | High ceiling | High |
