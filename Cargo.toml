@@ -17,8 +17,24 @@ criterion = { version = "0.8.2", features = ["html_reports"] }
 tempfile = "3.27.0"
 
 [[bench]]
-name = "throughput"
+name = "storage_write"
 harness = false
+path = "benches/storage/write.rs"
+
+[[bench]]
+name = "storage_scan"
+harness = false
+path = "benches/storage/scan.rs"
+
+[[bench]]
+name = "encoding_codecs"
+harness = false
+path = "benches/encoding/codecs.rs"
+
+[[bench]]
+name = "query_pipeline"
+harness = false
+path = "benches/query/pipeline.rs"
 
 [lib]
 name = "tinyolap"
