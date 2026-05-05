@@ -1,6 +1,7 @@
 use crate::parser::{InsertStmt, Literal};
-use crate::parser::ast::{Predicate, Projection, SelectStmt};
+use crate::parser::ast::{Predicate, Projection, SelectExpr, SelectStmt};
 use crate::storage::schema::{DataType, TableDef};
+
 
 #[derive(Debug)]
 pub enum InsertError {
@@ -112,23 +113,45 @@ pub fn analyse_insert(stmt: &InsertStmt, schema: &TableDef) -> Result<(), Insert
 }
 
 pub fn analyse_select(
-    stmt: &SelectStmt,
+    mut stmt: SelectStmt,
     schema: &TableDef,
-) -> Result<(), SelectError> {
+) -> Result<SelectStmt, SelectError> {
     if stmt.table != schema.name {
         return Err(SelectError::UnknownTable(stmt.table.clone()));
     }
-    if let Projection::Columns(names) = &stmt.projection {
-        for name in names {
-            if schema.columns.iter().all(|c| &c.name != name) {
-                return Err(SelectError::UnknownColumn(name.clone()));
-            }
+
+    stmt.projection = match stmt.projection {
+        Projection::All => {
+            let exprs = schema.columns.iter()
+                .map(|c| SelectExpr::Col(c.name.clone()))
+                .collect();
+            Projection::Exprs(exprs)
         }
-    }
+        Projection::Exprs(ref exprs) => {
+            for expr in exprs {
+                match expr {
+                    SelectExpr::Col(name) => {
+                        if schema.columns.iter().all(|c| &c.name != name) {
+                            return Err(SelectError::UnknownColumn(name.clone()));
+                        }
+                    }
+                    SelectExpr::Agg { col, .. } if col != "*" => {
+                        if schema.columns.iter().all(|c| &c.name != col) {
+                            return Err(SelectError::UnknownColumn(col.clone()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            stmt.projection
+        }
+    };
+
     if let Some(pred) = &stmt.where_clause {
         validate_predicate(pred, schema)?;
     }
-    Ok(())
+
+    Ok(stmt)
 }
 
 

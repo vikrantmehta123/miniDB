@@ -21,21 +21,13 @@ impl Processor for Projection {
             Err(e) => return Some(Err(e)),
         };
 
-        let schema_and_cols: Vec<_> = batch
+        let (schema, columns): (Vec<_>, Vec<_>) = batch
             .schema
             .into_iter()
             .zip(batch.columns.into_iter())
             .filter(|(def, _)| self.output_cols.contains(&def.name))
-            .collect();
+            .unzip();
 
-        let (schema, columns): (Vec<_>, Vec<_>) = match &batch.selection {
-            None => schema_and_cols.into_iter().unzip(),
-            Some(mask) => schema_and_cols
-                .into_iter()
-                .map(|(def, chunk)| (def, chunk.filter(mask)))
-                .unzip(),
-        };
-
-        Some(Ok(Batch { schema, columns, selection: None }))
+        Some(Ok(Batch { schema, columns }))
     }
 }

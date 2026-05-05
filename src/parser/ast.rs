@@ -7,8 +7,8 @@ pub enum Statement {
 #[derive(Debug, Clone)]
 pub struct InsertStmt {
     pub table: String,
-    pub columns: Option<Vec<String>>,  // None = all schema columns in order
-    pub rows: Vec<Vec<Literal>>,       // batch — outer Vec is rows
+    pub columns: Option<Vec<String>>,
+    pub rows: Vec<Vec<Literal>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -21,10 +21,25 @@ pub enum Literal {
     Null,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum AggFunc {
+    Sum,
+    Max,
+    Min,
+    Count,
+    Avg,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SelectExpr {
+    Col(String),
+    Agg { func: AggFunc, col: String },
+}
+
 #[derive(Debug, Clone)]
 pub enum Projection {
     All,
-    Columns(Vec<String>),
+    Exprs(Vec<SelectExpr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

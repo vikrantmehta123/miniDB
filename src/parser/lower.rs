@@ -1,6 +1,6 @@
 use sqlparser::ast as s;
 use crate::parser::{ParseError, Statement, InsertStmt, Literal};
-use crate::parser::ast::{SelectStmt, Projection, Predicate, CmpOp};
+use crate::parser::ast::{SelectStmt, Projection, SelectExpr, AggFunc, Predicate, CmpOp};
 
 pub fn lower(stmt: s::Statement) -> Result<Statement, ParseError> {
     match stmt {
@@ -9,7 +9,6 @@ pub fn lower(stmt: s::Statement) -> Result<Statement, ParseError> {
         other => Err(ParseError::Unsupported(format!("statement: {:?}", other))),
     }
 }
-
 
 fn lower_insert(ins: s::Insert) -> Result<InsertStmt, ParseError> {
     let table = ins.table.to_string();
@@ -34,9 +33,9 @@ fn lower_expr(e: s::Expr) -> Result<Literal, ParseError> {
     match e {
         s::Expr::Value(v) => lower_value(v.value),
         s::Expr::UnaryOp { op: s::UnaryOperator::Minus, expr } => match lower_expr(*expr)? {
-            Literal::Int(i)    => Ok(Literal::Int(-i)),
-            Literal::Float(f)  => Ok(Literal::Float(-f)),
-            Literal::UInt(u)   => Ok(Literal::Int(-(u as i64))),  // narrow path
+            Literal::Int(i)   => Ok(Literal::Int(-i)),
+            Literal::Float(f) => Ok(Literal::Float(-f)),
+            Literal::UInt(u)  => Ok(Literal::Int(-(u as i64))),
             _ => Err(ParseError::Unsupported("unary minus on non-numeric".into())),
         },
         other => Err(ParseError::Unsupported(format!("expr in VALUES: {:?}", other))),
@@ -60,12 +59,12 @@ fn lower_value(v: s::Value) -> Result<Literal, ParseError> {
 
 fn lower_cmpop(op: s::BinaryOperator) -> Result<CmpOp, ParseError> {
     match op {
-        s::BinaryOperator::Eq         => Ok(CmpOp::Eq),
-        s::BinaryOperator::NotEq      => Ok(CmpOp::Ne),
-        s::BinaryOperator::Lt         => Ok(CmpOp::Lt),
-        s::BinaryOperator::LtEq       => Ok(CmpOp::Le),
-        s::BinaryOperator::Gt         => Ok(CmpOp::Gt),
-        s::BinaryOperator::GtEq       => Ok(CmpOp::Ge),
+        s::BinaryOperator::Eq    => Ok(CmpOp::Eq),
+        s::BinaryOperator::NotEq => Ok(CmpOp::Ne),
+        s::BinaryOperator::Lt    => Ok(CmpOp::Lt),
+        s::BinaryOperator::LtEq  => Ok(CmpOp::Le),
+        s::BinaryOperator::Gt    => Ok(CmpOp::Gt),
+        s::BinaryOperator::GtEq  => Ok(CmpOp::Ge),
         other => Err(ParseError::Unsupported(format!("comparison op: {:?}", other))),
     }
 }
@@ -93,6 +92,54 @@ fn lower_predicate(e: s::Expr) -> Result<Predicate, ParseError> {
     }
 }
 
+fn lower_agg_func(name: &str) -> Result<AggFunc, ParseError> {
+    match name.to_lowercase().as_str() {
+        "sum"   => Ok(AggFunc::Sum),
+        "max"   => Ok(AggFunc::Max),
+        "min"   => Ok(AggFunc::Min),
+        "count" => Ok(AggFunc::Count),
+        "avg"   => Ok(AggFunc::Avg),
+        other   => Err(ParseError::Unsupported(format!("unknown aggregate function: {other}"))),
+    }
+}
+
+fn lower_projection(items: Vec<s::SelectItem>) -> Result<Projection, ParseError> {
+    let exprs = items.into_iter().map(|item| match item {
+        s::SelectItem::UnnamedExpr(s::Expr::Identifier(id)) => Ok(SelectExpr::Col(id.value)),
+        s::SelectItem::UnnamedExpr(s::Expr::Function(f)) => {
+            let func_name = f.name.to_string();
+            let func = lower_agg_func(&func_name)?;
+            let col = match f.args {
+                s::FunctionArguments::List(list) => {
+                    match list.args.into_iter().next() {
+                        Some(s::FunctionArg::Unnamed(s::FunctionArgExpr::Wildcard)) => "*".into(),
+                        Some(s::FunctionArg::Unnamed(s::FunctionArgExpr::Expr(
+                            s::Expr::Identifier(id)
+                        ))) => id.value,
+                        other => return Err(ParseError::Unsupported(
+                            format!("unsupported function argument: {:?}", other)
+                        )),
+                    }
+                }
+                other => return Err(ParseError::Unsupported(
+                    format!("unsupported function args form: {:?}", other)
+                )),
+            };
+            Ok(SelectExpr::Agg { func, col })
+        }
+        other => Err(ParseError::Unsupported(format!("unsupported projection item: {:?}", other))),
+    }).collect::<Result<Vec<_>, _>>()?;
+
+    let has_col = exprs.iter().any(|e| matches!(e, SelectExpr::Col(_)));
+    let has_agg = exprs.iter().any(|e| matches!(e, SelectExpr::Agg { .. }));
+    if has_col && has_agg {
+        return Err(ParseError::Unsupported(
+            "mixing column references and aggregates without GROUP BY is not supported".into()
+        ));
+    }
+
+    Ok(Projection::Exprs(exprs))
+}
 
 fn lower_select(query: s::Query) -> Result<SelectStmt, ParseError> {
     let select = match *query.body {
@@ -119,21 +166,11 @@ fn lower_select(query: s::Query) -> Result<SelectStmt, ParseError> {
     Ok(SelectStmt { table, projection, where_clause })
 }
 
-fn lower_projection(items: Vec<s::SelectItem>) -> Result<Projection, ParseError> {
-    let cols = items.into_iter().map(|item| match item {
-        s::SelectItem::UnnamedExpr(s::Expr::Identifier(id)) => Ok(id.value),
-        other => Err(ParseError::Unsupported(format!("unsupported projection item: {:?}", other))),
-    }).collect::<Result<Vec<_>, _>>()?;
-    Ok(Projection::Columns(cols))
-}
 
-
-
-// Tests
 #[cfg(test)]
 mod tests {
     use crate::parser::{parse, Statement};
-    use crate::parser::ast::{Predicate, CmpOp, Literal};
+    use crate::parser::ast::{Predicate, CmpOp, Literal, Projection, SelectExpr, AggFunc};
 
     #[test]
     fn test_where_lowering() {
@@ -143,7 +180,6 @@ mod tests {
             Statement::Select(s) => s,
             _ => panic!("expected SELECT"),
         };
-        println!("{:#?}", select.where_clause);
         assert_eq!(
             select.where_clause,
             Some(Predicate::And(
@@ -151,5 +187,22 @@ mod tests {
                 Box::new(Predicate::Cmp { col: "uid".into(), op: CmpOp::Eq, value: Literal::Int(42)   }),
             ))
         );
+    }
+
+    #[test]
+    fn test_agg_lowering() {
+        let sql = "SELECT sum(ts), count(*), max(uid) FROM events";
+        let stmt = parse(sql).unwrap();
+        let select = match stmt {
+            Statement::Select(s) => s,
+            _ => panic!("expected SELECT"),
+        };
+        let exprs = match select.projection {
+            Projection::Exprs(e) => e,
+            _ => panic!("expected Exprs"),
+        };
+        assert_eq!(exprs[0], SelectExpr::Agg { func: AggFunc::Sum,   col: "ts".into() });
+        assert_eq!(exprs[1], SelectExpr::Agg { func: AggFunc::Count,  col: "*".into()  });
+        assert_eq!(exprs[2], SelectExpr::Agg { func: AggFunc::Max,   col: "uid".into() });
     }
 }
