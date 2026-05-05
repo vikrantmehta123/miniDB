@@ -1,36 +1,45 @@
-# TASK-003 — WHERE: Parser Lowering
+# TASK-003 — Aggregators: COUNT and AVG
 
 ## Description
-Extend the SQL parser layer to carry an optional `Predicate` tree from the sqlparser-rs AST into the internal `Statement::Select`. This is the first of three WHERE tasks. No evaluation yet — just the AST representation and lowering.
+Complete the five standard SQL aggregates. MIN is already done. Count and Avg are stubbed in `factory.rs` returning `InvalidData`. This task wires them in.
+
+**Prerequisite: TASK-002 is done.**
 
 ---
 
 ## Steps
 
-- [X] **Define `Predicate` enum** (`src/parser/ast.rs`)
-  - `Predicate::Cmp { col: String, op: CmpOp, value: Literal }` for leaf predicates
-  - `Predicate::And(Box<Predicate>, Box<Predicate>)`
-  - `Predicate::Or(Box<Predicate>, Box<Predicate>)`
-  - `Predicate::Not(Box<Predicate>)`
-  - `CmpOp` enum: `Eq, Ne, Lt, Le, Gt, Ge`
-  - `Literal` enum: `Int(i64), Float(f64), Str(String), Bool(bool)`
+### `count` (`src/aggregator/count.rs`)
 
-- [X] **Lower WHERE clause** (`src/parser/lower.rs`)
-  - Walk the sqlparser-rs `Expr` for the WHERE clause recursively
-  - Map `BinaryOp` with `And/Or` → `Predicate::And/Or`
-  - Map `UnaryOp(Not, ...)` → `Predicate::Not`
-  - Map `BinaryOp` with comparison ops → `Predicate::Cmp`
-  - Return `Err` with a clear message for subqueries, functions, IS NULL, BETWEEN, IN
+- [ ] State is `u64`; `update` increments by `chunk.len()`
+- [ ] `COUNT(*)` and `COUNT(col)` equivalent for now (no nulls in Phase 1)
+- [ ] `finalize` returns the `u64` as a `ColumnChunk::U64`
+- [ ] `output_type()` returns `DataType::U64`
+- [ ] Tests: empty → 0, multi-chunk, merge
 
-- [X] **Carry predicate in `Statement::Select`**
-  - Add `where_clause: Option<Predicate>` to the `Select` struct
-  - Executor receives it (can ignore for now — evaluation is TASK-004)
+### `avg` (`src/aggregator/avg.rs`)
 
-- [X] **Test**: parse `WHERE ts > 1000 AND uid = 42`, assert the predicate tree structure
+- [ ] State is `(sum: f64, count: u64)`
+- [ ] `update`: add each value cast to f64, increment count
+- [ ] `finalize`: return `sum / count` as `ColumnChunk::F64`; return `0.0` on empty (or `None` if you add a sentinel — your call)
+- [ ] `output_type()` returns `DataType::F64`
+- [ ] Tests: known values, empty, merge across chunks
+
+### Wire into factory (`src/aggregator/factory.rs`)
+
+- [ ] Replace the `Count | Avg => Err(...)` stub with real dispatch
+- [ ] `Count` → `Box::new(CountAgg::new())` (no DataType needed — type-blind)
+- [ ] `Avg` → `Box::new(AvgAgg::new())` (accumulates as f64 regardless of input type)
+
+### Integration tests
+
+- [ ] `SELECT count(*) FROM events` — verify row count
+- [ ] `SELECT avg(uid) FROM events WHERE ok = true` — filter + avg
+- [ ] `SELECT sum(ts), count(*), min(ts), max(ts), avg(ts) FROM events` — all five in one query
 
 ---
 
 ## Out of Scope
-- Predicate evaluation (TASK-004)
-- Granule skipping (TASK-005)
-- LIKE, IN, BETWEEN, IS NULL
+- `first` / `last` accumulators (deferred)
+- Approximate aggregations: HyperLogLog, quantiles (Deferred.md)
+- GROUP BY variants (TASK-006)

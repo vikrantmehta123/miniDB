@@ -1,32 +1,49 @@
-# TASK-007 — Rayon: Granule-Level Parallelism
+# TASK-007 — SIMD: Vectorized Scan and Aggregation
 
 ## Description
-Within a single part, parallelize column reads across columns (not across granules — granules within one column are sequential for cache locality). Multiple columns can be decompressed and decoded independently in parallel.
-
-**Sprint 3 — estimated 1 session.**
+Use SIMD to vectorize the two hottest paths: predicate comparisons in `evaluator.rs` and sum accumulation in `aggregator/sum.rs`. This is listed as a **required** learning goal in SPEC.md — it's the "I understand the hardware" proof point in any systems interview.
 
 ---
 
 ## Steps
 
-- [ ] **Identify the parallelism boundary**
-  - The per-part scan reads N columns; each column's granules are read sequentially
-  - Columns are independent: `ts.bin` and `uid.bin` share no state
-  - Parallelize across `projection.columns` using `par_iter()`
+### Choose the SIMD approach (decide before writing code)
 
-- [ ] **Refactor per-column read into a standalone function**
-  - Extract `read_column(part_dir, col_def) -> io::Result<ColumnChunk>` if not already isolated
-  - Must be `Send + 'static` or use a scoped rayon thread pool
+- [ ] **Option A**: `std::simd` (nightly Rust) — portable, idiomatic, unstable
+- [ ] **Option B**: `wide` crate (stable) — stable API over the same SIMD ops
+- [ ] **Option C**: raw `std::arch` intrinsics — maximum control, x86-specific
+- [ ] Recommendation: start with `wide` (stable, readable); graduate to `std::arch` for a specific hot loop if you want to show depth
+- [ ] Record decision here before starting
 
-- [ ] **Combine with part-level parallelism (TASK-006)**
-  - Outer: `parts.par_iter()` (from TASK-006)
-  - Inner: `columns.par_iter()` per part
-  - Result: a `Vec<Vec<ColumnChunk>>` — indexed by `[part][column]`, merged in order
+### Vectorized comparison (`src/evaluator.rs`)
 
-- [ ] **Benchmark**: measure speedup on a wide table (4+ columns) vs single-threaded
+- [ ] For `ColumnChunk::I64` with `Predicate::Cmp`: process 4 (or 8) values per iteration using a SIMD lane
+- [ ] Compare lane vs a splat of the literal value, extract a `u64` bitmask
+- [ ] Convert bitmask to `Vec<bool>` for the tail and for types not yet SIMD-accelerated
+- [ ] Gate the SIMD path behind a type check or a separate function; keep the scalar fallback for all other types
+
+### Vectorized sum (`src/aggregator/sum.rs`)
+
+- [ ] For `Sum<i64>`: accumulate into a SIMD register (4 or 8 lanes), horizontal-add at the end of each chunk
+- [ ] Scalar tail for `len % lane_width != 0`
+- [ ] Add a separate `sum_simd` function; call it from `update` based on a feature flag or always
+
+### Benchmark before/after
+
+- [ ] Re-run the scan benchmark with a `WHERE ts > X` predicate — scalar vs SIMD
+- [ ] Re-run `SELECT sum(ts) FROM events` — scalar vs SIMD
+- [ ] Record numbers here
+
+### Numbers (fill in after benchmarking)
+
+| Path | Scalar MB/s | SIMD MB/s | Speedup |
+|---|---|---|---|
+| i64 `>` comparison | — | — | — |
+| i64 sum | — | — | — |
 
 ---
 
 ## Out of Scope
-- Async I/O (not in Phase 1)
-- Granule-level parallelism within one column (memory bandwidth bound, likely not worth it)
+- SIMD for string comparisons
+- AVX-512 (focus on SSE4.2 / AVX2 first)
+- SIMD for Delta decode (see OPTIMIZATIONS.md)

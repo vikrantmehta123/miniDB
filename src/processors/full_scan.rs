@@ -55,7 +55,7 @@ impl Processor for FullScan {
                 };
                 columns.push(chunk);
             }
-            Ok(Batch { schema: self.columns.clone(), columns, selection: None })
+            Ok(Batch { schema: self.columns.clone(), columns })
         })();
 
         Some(result)

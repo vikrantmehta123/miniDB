@@ -25,7 +25,7 @@ pub fn execute_select(
     schema: &TableDef,
     table_dir: PathBuf,
 ) -> Result<Vec<ColumnChunk>, SelectError> {
-    analyse_select(&stmt, schema)?;
+    let stmt = analyse_select(stmt, schema)?;
 
     let mut plan = crate::processors::build_plan(table_dir, &stmt, schema)
         .map_err(exec_err_to_select_err)?;

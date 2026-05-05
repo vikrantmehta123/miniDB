@@ -1,36 +1,42 @@
-# TASK-009 — Aggregators: MIN, COUNT, AVG
+# TASK-009 — Background Compaction: Merge Algorithm
 
 ## Description
-Add the three remaining essential aggregators. Each is a standalone accumulator in `src/aggregator/`. After this, the five SQL standard aggregates (SUM, MAX, MIN, COUNT, AVG) all work.
-
-**Sprint 4 — estimated 1 session.**
+Implement the k-way merge that combines N sorted parts into one larger sorted part. Covers the merge logic only — the scheduler and reader integration are TASK-010. Prerequisite: TASK-008 design decisions must be filled in.
 
 ---
 
 ## Steps
 
-- [ ] **`min`** (`src/aggregator/min.rs`)
-  - Mirror of the existing `max` accumulator
-  - Tracks the running minimum; `finalize()` returns it
-  - Wire `AggFunc::Min` in the executor dispatch (TASK-008)
+### Module scaffold (`src/compaction/`)
 
-- [ ] **`count`** (`src/aggregator/count.rs`)
-  - Increments a `u64` counter for each non-null row
-  - `COUNT(*)` and `COUNT(col)` are equivalent for now (no nulls in Phase 1)
-  - Wire `AggFunc::Count` in the executor
+- [ ] `mod.rs` — re-exports
+- [ ] `merger.rs` — merge algorithm (this task)
+- [ ] `scheduler.rs` — TASK-010
 
-- [ ] **`avg`** (`src/aggregator/avg.rs`)
-  - Maintains a running `sum: f64` and `count: u64`
-  - `finalize()` returns `sum / count as f64`; return `None` on empty input
-  - Wire `AggFunc::Avg` in the executor
+### k-way merge (`src/compaction/merger.rs`)
 
-- [ ] **Tests**
-  - One test per aggregator: known input, assert correct output
-  - Edge case: empty table → `count` returns 0, `min/max/avg` return `None` or a sentinel
+- [ ] Accept `parts: Vec<u32>` (part ids to merge) and `table_dir: &Path`
+- [ ] Open a `ColumnReader` (or `StringColumnReader`) per column per input part
+- [ ] Use a min-heap keyed on the primary-key column value to select the next row
+- [ ] Accumulate rows into output `ColumnChunk` buffers; flush to a new part via `TableWriter` when buffers reach a threshold
+- [ ] Output lands in `tmp_part_NNNNN/`; rename to `part_NNNNN/` on success
+- [ ] On any failure: delete `tmp_part_NNNNN/`, leave source parts untouched
+
+### Atomicity
+
+- [ ] Source parts are deleted only after the rename succeeds
+- [ ] If the process crashes mid-merge, `tmp_part_*` directories are orphans — add cleanup of `tmp_*` dirs on startup in `main.rs`
+
+### Test
+
+- [ ] Write 3 parts with interleaved but within-part-sorted rows
+- [ ] Call the merge function directly (no scheduler)
+- [ ] Assert: output part contains all rows in globally sorted order
+- [ ] Assert: source parts are deleted; merged part is readable via `TableReader`
 
 ---
 
 ## Out of Scope
-- Approximate aggregations (HyperLogLog, quantiles — deferred)
-- `first` / `last` accumulators (deferred)
-- GROUP BY variants (TASK-010)
+- Scheduler (TASK-010)
+- Reader integration / part visibility (TASK-010)
+- External merge sort for parts exceeding memory (Phase 2)

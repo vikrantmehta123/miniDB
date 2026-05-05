@@ -24,19 +24,21 @@ impl Processor for Filter {
             Err(e) => return Some(Err(e)),
         };
 
-        let named: Vec<(&str, &_)> = batch
-            .schema
-            .iter()
-            .map(|c| c.name.as_str())
-            .zip(batch.columns.iter())
-            .collect();
+        let mask = {
+            let named: Vec<(&str, &_)> = batch
+                .schema
+                .iter()
+                .map(|c| c.name.as_str())
+                .zip(batch.columns.iter())
+                .collect();
+            match evaluate(&self.predicate, &named) {
+                Ok(m) => m,
+                Err(e) => return Some(Err(ExecutionError::InvalidData(e.to_string()))),
+            }
+        };
 
-        let mask = evaluate(&self.predicate, &named)
-            .map_err(|e| ExecutionError::InvalidData(e.to_string()));
+        let columns = batch.columns.iter().map(|c| c.filter(&mask)).collect();
 
-        match mask {
-            Ok(m) => Some(Ok(Batch { selection: Some(m), ..batch })),
-            Err(e) => Some(Err(e)),
-        }
+        Some(Ok(Batch { schema: batch.schema, columns }))
     }
 }

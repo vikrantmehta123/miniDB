@@ -1,41 +1,52 @@
-# TASK-002 — Criterion Benchmarks
+# TASK-002 — Aggregations: AST, Parser, Pipeline Node
 
 ## Description
-Wire up `criterion` and establish baseline throughput numbers for the write and scan paths. These numbers are the "proof" behind every performance claim on a resume. Record them in this file so future comparisons are honest.
+Make `SELECT sum(ts), count(*), max(uid) FROM events WHERE ts > 100` work end-to-end. This requires extending the AST, lowering aggregate function calls, and adding an `Aggregate` processor node to the pipeline. Wire the existing `Sum` and `Max` accumulators — the remaining ones (Min, Count, Avg) come in TASK-003.
 
-**Sprint 1 — estimated 1 session.**
+**This is the OLAP use case. Without it the project doesn't justify the name.**
 
 ---
 
 ## Steps
 
-- [X] **Add criterion**
-  - Add `criterion` to `[dev-dependencies]` in `Cargo.toml`
-  - Add a `[[bench]]` entry pointing to `benches/throughput.rs`
+### AST (`src/parser/ast.rs`)
 
-- [X] **Write-path benchmark**
-  - Generate 1M i64 values (e.g. `0..1_000_000`)
-  - Benchmark `TableWriter::insert` end-to-end (includes LZ4 + fsync)
-  - Report throughput in MB/s and ns/value
+- [X] Add `AggFunc` enum: `Sum, Max, Min, Count, Avg`
+- [X] Add `SelectExpr` enum: `Col(String)` | `Agg { func: AggFunc, col: String }`
+- [X] Replace `Projection::Columns(Vec<String>)` with `Projection::Exprs(Vec<SelectExpr>)`
 
-- [X] **Scan-path benchmark**
-  - Pre-write the same 1M rows to a temp directory in a `setup` closure
-  - Benchmark `TableReader` full scan of one i64 column
-  - Report throughput in MB/s
+### Parser lowering (`src/parser/lower.rs`)
 
-- [X] **Record baseline numbers here**
+- [X] Detect `Function` nodes in the SELECT list, lower to `SelectExpr::Agg`
+- [X] `count(*)` → `SelectExpr::Agg { func: AggFunc::Count, col: "*".into() }`
+- [X] Reject mixing `Col` and `Agg` without GROUP BY
 
----
+### Analyser (`src/analyser.rs`)
 
-## Baseline Numbers (fill in after running)
+- [X] Update `analyse_select` to handle `Projection::Exprs`
+- [X] Validate agg column names; skip validation for `"*"`
+- [X] Expand `Projection::All` into `Exprs(vec![SelectExpr::Col(...)])` for each schema column
 
-| Benchmark | Throughput | Notes |
-|---|---|---|
-| write 1M i64 | ~705 MiB/s | Delta + LZ4 + fsync, ~10.8 ms/iter |
-| scan 1M i64 | ~443 MiB/s | LZ4 decompress + delta decode, ~17.2 ms/iter |
+### Aggregate processor (`src/processors/aggregate.rs`)
+
+- [X] `Aggregate::new(input, aggs, input_idx, output_schema)`
+- [X] Drain all input batches, accumulate into per-agg state, return a single 1-row `Batch`
+- [X] `done` flag so second call returns `None`
+
+### Pipeline wiring (`src/processors/mod.rs`)
+
+- [X] `build_plan`: if projection contains any `Agg` exprs, append `Aggregate` node
+- [X] `aggregator::factory::build(func, DataType)` dispatches to correct accumulator
+- [ ] `Count` and `Avg` return `InvalidData` stub — complete in TASK-003
+
+### Test
+
+- [X] Parser test: `SELECT sum(ts), count(*), max(uid)` — assert lowered AST
+- [ ] Integration test: `SELECT sum(ts) FROM events` on known rows
+- [ ] Integration test: `SELECT max(uid) FROM events WHERE ok = true`
 
 ---
 
 ## Out of Scope
-- Per-codec benchmarks (add in TASK-006 monomorphization evaluation if revisited)
-- Multi-column benchmarks
+- Min, Count, Avg accumulators (TASK-003)
+- GROUP BY (TASK-006)

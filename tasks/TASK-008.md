@@ -1,36 +1,46 @@
-# TASK-008 — Wire Aggregators into the Executor
+# TASK-008 — Background Compaction: Design Review
 
 ## Description
-Connect the existing aggregators (`sum`, `max`, `top_k`) to the executor so `SELECT sum(ts) FROM events` actually works end-to-end. This requires parser lowering for aggregate functions and an executor dispatch layer.
-
-**Sprint 4 — estimated 1 session.**
+Before writing any compaction code, spend one session sketching the merge algorithm and concurrency model. This is the MergeTree mechanic that makes the project credible for DB-infrastructure roles. The output of this task is a filled-in design section below — no code.
 
 ---
 
 ## Steps
 
-- [ ] **Extend the AST** (`src/parser/ast.rs`)
-  - Add `SelectExpr` enum: `Column(String)` or `Agg { func: AggFunc, col: String }`
-  - `AggFunc` enum: `Sum, Max, Min, Count, Avg, TopK(usize)` — start with Sum and Max
-  - Replace `Projection::Columns(Vec<String>)` with `Projection::Exprs(Vec<SelectExpr>)`
+- [ ] **Phase decision**: is this Phase 1 or Phase 2?
+  - Phase 1: adds the most impressive talking point but also the most risk
+  - Phase 2: safe, but weakens the story vs ClickHouse-style systems
+  - Record decision here
 
-- [ ] **Lower aggregate calls** (`src/parser/lower.rs`)
-  - Detect `sqlparser::ast::Function` nodes in the SELECT list
-  - Map `sum(col)` → `SelectExpr::Agg { func: AggFunc::Sum, col }`
-  - Reject mixing bare columns and aggregates without GROUP BY (return a clear error)
+- [ ] **Sketch the merge algorithm**
+  - k-way merge of N sorted parts on the primary key
+  - Memory model: read one granule at a time from each input part (bounded memory)
+  - Output: written via `TableWriter` to `tmp_part_NNNNN/`, renamed atomically on success
 
-- [ ] **Executor dispatch** (`src/executor.rs`)
-  - If all `SelectExpr`s are `Agg` variants: route to an aggregation path
-  - Aggregation path: scan the required column(s), pass each granule's values to the accumulator, call `finalize()`, print the result
-  - Mix of bare columns + aggs without GROUP BY → error (GROUP BY is TASK-010)
+- [ ] **Sketch the concurrency model**
+  - How does a reader know which parts are stable vs being merged?
+  - Options: `Arc<RwLock<Vec<PartHandle>>>`, generation counter, tombstones in the part list
+  - How does a concurrent insert avoid interfering with an in-progress merge?
 
-- [ ] **Integration test**
-  - Insert known rows, `SELECT sum(ts) FROM events` — verify the sum
-  - `SELECT max(uid) FROM events` — verify the max
+- [ ] **Sketch the scheduler**
+  - Trigger: part count > threshold (e.g. 10) OR total small-part size > threshold
+  - Selection: smallest-N-parts-first (ClickHouse style)
+  - Threading: dedicated `std::thread` vs `tokio` task
 
 ---
 
-## Out of Scope
-- MIN, COUNT, AVG (TASK-009)
-- GROUP BY (TASK-010)
-- Interaction with WHERE (should work for free once TASK-004 is done)
+## Design Decisions (fill in during the session)
+
+**Phase decision:**
+
+**Merge algorithm:**
+
+**Concurrency model:**
+
+**Scheduler:**
+
+---
+
+## References
+- `src/storage/table_writer.rs` — the write path the merger will reuse
+- ClickHouse `MergeTreeDataMergerMutator`: `/Personal/open-source/ClickHouse/src/Storages/MergeTree/`
