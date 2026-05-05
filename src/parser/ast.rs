@@ -60,4 +60,7 @@ pub struct SelectStmt {
     pub table: String,
     pub projection: Projection,
     pub where_clause: Option<Predicate>,
+    // Column names from GROUP BY col1, col2. Empty = no GROUP BY.
+    // Names are unresolved at this layer- hence, Vec<String>
+    pub group_by: Vec<String>,
 }
